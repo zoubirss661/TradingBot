@@ -60,10 +60,6 @@ PLATFORM_META = {
     "gateio":   {"emoji": "⚪", "name": "Gate.io", "tags": "#Gate", "ref": "gateio"},
     "twitter":  {"emoji": "🐦", "name": "Twitter (X)", "tags": "#Crypto", "ref": "binance"},
     "telegram": {"emoji": "📱", "name": "Telegram", "tags": "#Crypto", "ref": "binance"},
-    "facebook": {"emoji": "📘", "name": "Facebook", "tags": "#Crypto", "ref": "binance"},
-    "whatsapp": {"emoji": "💬", "name": "WhatsApp", "tags": "#Crypto", "ref": "binance"},
-    "reddit":   {"emoji": "🔴", "name": "Reddit", "tags": "#Crypto", "ref": "binance"},
-    "discord":  {"emoji": "🎮", "name": "Discord", "tags": "#Crypto", "ref": "binance"},
 }
 
 def referral_for(source):
@@ -1687,7 +1683,6 @@ def build_social_text(res, platform="binance"):
     sym_u = sym.upper()
     trade_link = coin_link(sym, "binance_fut")
     
-    # عملتين وهاشتاجين فقط
     coins = hot_coins_for(sym)
     other_coin = next((c for c in coins if c != sym), "BTC")
     hashtags = f"#{sym} #{other_coin}"
@@ -1707,12 +1702,15 @@ def build_social_text(res, platform="binance"):
     return text
 
 def keyboard_share_post(res):
-    sym = res["sym"]
-    
     trade_meta = [
         ("binance", "🟡", "Binance Square"),
+        ("bybit",   "🔵", "Bybit"),
+        ("okx",     "⚫", "OKX"),
+        ("bitget",  "🟢", "Bitget"),
+        ("kucoin",  "🟢", "KuCoin"),
+        ("gateio",  "⚪", "Gate"),
         ("twitter", "🐦", "Twitter (X)"),
-        ("telegram", "📱", "Telegram"),
+        ("telegram", "📱", "Telegram")
     ]
     
     trade_rows = []
@@ -1720,7 +1718,7 @@ def keyboard_share_post(res):
         # نسخ فقط
         short_text = build_social_text(res, key)
         trade_rows.append([
-            InlineKeyboardButton(f"📋 نسخ منشور {name}", copy_text=CopyTextButton(text=short_text[:250]))
+            InlineKeyboardButton(f"📋 نسخ لـ {emoji} {name}", copy_text=CopyTextButton(text=short_text[:250]))
         ])
 
     return InlineKeyboardMarkup(
@@ -2585,7 +2583,7 @@ async def gate(update):
         _cooldown[user.id] = time.time()
     return st, True
 
- async def handle_symbol(update, raw, to_channel=False):
+async def handle_symbol(update, raw, to_channel=False):
     st, ok = await gate(update)
     if not ok: return
     sym = clean_symbol(raw)
