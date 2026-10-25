@@ -302,7 +302,6 @@ def touch_user(user, cmd="text"):
     with store.lock:
         u = store.data["users"].get(uid) or dict(id=user.id, first_seen=now_s(), requests=0, cmds={}, last_cmd=None, points=0)
         
-        # Daily Points Logic
         last_seen_date = dt.datetime.fromtimestamp(u.get("last_seen", 0)).date()
         current_date = dt.datetime.now().date()
         if current_date > last_seen_date:
@@ -928,6 +927,13 @@ def add_indicators(df, atrp_win=100):
     df["wick_up"] = (df["high"] - df[["close","open"]].max(axis=1)) / rng
     df["wick_dn"] = (df[["close","open"]].min(axis=1) - df["low"]) / rng
     df["ext_atr"] = (c - df["ema20"]) / df["atr"]
+    
+    # --- إضافات النخبة v98 ---
+    tp = (df["high"] + df["low"] + df["close"]) / 3
+    df["vwap"] = (tp * df["volume"]).rolling(50).sum() / df["volume"].rolling(50).sum().replace(0, np.nan)
+    df["highest_10"] = df["high"].rolling(10).max()
+    df["lowest_10"] = df["low"].rolling(10).min()
+    
     return df
 
 def detect_trend(df, i):
@@ -1107,8 +1113,14 @@ def grade_setup(df, i, side, futures_score=0):
     elif futures_score >= 1: score += 1
     elif futures_score <= -3: score -= 2
     elif futures_score <= -1: score -= 1
-    if score >= 4: return "A+"
-    if score >= 3: return "A"
+    
+    # --- إضافات النخبة v98 ---
+    vwap = float(r.get("vwap", 0))
+    if side == 1 and r.close > vwap: score += 1
+    if side == -1 and r.close < vwap: score += 1
+    
+    if score >= 5: return "A+"
+    if score >= 4: return "A"
     if score >= 2: return "B"
     return "C"
 
@@ -1118,6 +1130,17 @@ def decide_side(df, i, trend, bias_d, long_ok, short_ok):
         c = float(r["close"]); sgn = lambda x: 1 if x > 0 else (-1 if x < 0 else 0)
         score = (sgn(c - float(r["ema20"])) + sgn(c - float(r["ema50"])) + sgn(c - float(r["ema200"]))
                  + sgn(float(r["ema20"]) - float(r["ema50"])) + sgn(float(r["macd_hist"])))
+                 
+        # --- إضافات النخبة v98 ---
+        vwap = float(r.get("vwap", c))
+        if c > vwap: score += 1
+        elif c < vwap: score -= 1
+        
+        highest_10 = float(r.get("highest_10", c))
+        lowest_10 = float(r.get("lowest_10", c))
+        if c >= highest_10: score += 1
+        if c <= lowest_10: score -= 1
+
         if score <= -3: return -1
         if score >= 3: return 1
         if score in (-2, 2):
@@ -1715,11 +1738,8 @@ def keyboard_share_post(res):
     
     trade_rows = []
     for key, emoji, name in trade_meta:
-        # نسخ فقط
         short_text = build_social_text(res, key)
-        trade_rows.append([
-            InlineKeyboardButton(f"📋 نسخ لـ {emoji} {name}", copy_text=CopyTextButton(text=short_text[:250]))
-        ])
+        trade_rows.append([InlineKeyboardButton(f"📋 نسخ لـ {emoji} {name}", copy_text=CopyTextButton(text=short_text[:250]))])
 
     return InlineKeyboardMarkup(
         trade_rows + [
@@ -1762,6 +1782,7 @@ def render_chart(res, tier="free", published=False):
         ax.plot(x, df["ema20"], color="#f5c518", lw=1.3)
         ax.plot(x, df["ema50"], color="#1976d2", lw=1.3)
         ax.plot(x, df["ema200"], color="#7b1fa2", lw=1.3)
+        ax.plot(x, df["vwap"], color="#ff00ff", lw=1.5, ls=":")
     ax.plot(x, df["close"], color=blue, lw=2.2)
     levels = [(lv["entry"], "دخول", "#0d47a1", "-."), (lv["sl"], "وقف", "#d32f2f", "--")]
     for j,tp in enumerate(lv["tps"][:n_tps], 1):
@@ -3569,7 +3590,6 @@ async def on_text(update, ctx):
     text = update.message.text.strip()
     uid = str(update.effective_user.id)
 
-    # 1. RISK CALCULATOR
     if 'awaiting_risk' in ctx.user_data:
         sym = ctx.user_data.pop('awaiting_risk')
         try:
@@ -3599,7 +3619,6 @@ async def on_text(update, ctx):
             await update.message.reply_text("⚠️ صيغة خاطئة. أرسل رقمين مفصولين بمسافة (مثال: 1000 2)")
         return
 
-    # 2. PORTFOLIO ADD
     if 'awaiting_port' in ctx.user_data:
         sym = ctx.user_data.pop('awaiting_port')
         try:
@@ -3617,8 +3636,38 @@ async def on_text(update, ctx):
             await update.message.reply_text("⚠️ أرسل رقماً صحيحاً (مثال: 100)")
         return
 
-    # 3. NORMAL SYMBOL ANALYSIS
-    await handle_symbol(update, text.split()[0])
+    # NORMAL SYMBOL
+    touch_user(update.effective_user)
+    sym = clean_symbol(text.split()[0])
+    if not sym: await update.message.reply_text("📝 إدخال رمز عملة صحيح"); return
+    
+    wait = await update.message.reply_text(f"⏳ جارٍ تحليل {sym}...")
+    try:
+        res = await asyncio.to_thread(get_analysis, sym)
+        st, _ = user_status(update.effective_user.id, store.data["users"].get(uid, {}))
+        tier = "admin" if st=="admin" else ("vip" if st=="vip" else "free")
+        
+        kb = keyboard(sym, res["tf"], tier, "binance_fut")
+        img = await asyncio.to_thread(render_chart, res, tier)
+        cap = caption_vip(res) if tier in ("admin","vip") else caption_free(res)
+        
+        await update.message.reply_photo(photo=img, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
+        
+        with store.lock:
+            if uid in store.data["users"]:
+                store.data["users"][uid]["points"] = store.data["users"][uid].get("points", 0) + 2
+                store.save("users")
+            
+    except PairNotFound: 
+        await update.message.reply_text(f"❌ لم يتم العثور على العملة: {sym}")
+    except NoData: 
+        await update.message.reply_text("⚠️ البيانات غير متوفرة")
+    except Exception: 
+        log.exception("handle")
+        await update.message.reply_text("⚠️ حدث خطأ")
+    finally:
+        try: await wait.delete()
+        except Exception: pass
 
 PUBLIC_COMMANDS = [("start","ابدأ"),("help","المساعدة"),("myid","رقمي"),
                    ("vip","VIP"),("menu","قائمتي 📋"),("portfolio","محفظتي 📊")]
@@ -3648,7 +3697,7 @@ async def post_init(app):
         asyncio.create_task(golden_loop(app)), asyncio.create_task(promo_loop(app)),
         asyncio.create_task(whale_hunter_loop(app)),
     ]
-    log.info("ryma v97 | max_open=%d | golden_cycle=%ds | min_score=%d | multi=%s | maint=%s",
+    log.info("ryma v98 | max_open=%d | golden_cycle=%ds | min_score=%d | multi=%s | maint=%s",
              MAX_OPEN, CYCLE_GOLDEN, get_golden_config().get("min_score",1), is_multi_exchange(), is_maintenance())
 
 async def post_shutdown(app):
