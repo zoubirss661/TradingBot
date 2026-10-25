@@ -2585,7 +2585,7 @@ async def gate(update):
         _cooldown[user.id] = time.time()
     return st, True
 
-async def handle_symbol(update, raw, to_channel=False):
+ async def handle_symbol(update, raw, to_channel=False):
     st, ok = await gate(update)
     if not ok: return
     sym = clean_symbol(raw)
@@ -2600,21 +2600,28 @@ async def handle_symbol(update, raw, to_channel=False):
         kb = keyboard(sym, res["tf"], tier, source)
         img = await asyncio.to_thread(render_chart, res, tier)
         cap = caption_vip(res) if tier in ("admin","vip") else caption_free(res)
+        
         await update.message.reply_photo(photo=img, caption=cap, parse_mode=ParseMode.HTML,
                                          protect_content=(st!="admin" and PROTECT), reply_markup=kb)
+        
         if st == "admin":
             try: await update.message.reply_text(build_copy_post(res))
             except Exception: pass
             
         # Add points for analysis
+        uid_str = str(update.effective_user.id)
         with store.lock:
-            uid_str = str(update.effective_user.id)
-if uid_str in store.data["users"]:
-    store.data["users"][uid_str]["points"] = store.data["users"][uid_str].get("points", 0) + 2
+            if uid_str in store.data["users"]:
+                store.data["users"][uid_str]["points"] = store.data["users"][uid_str].get("points", 0) + 2
+                store.save("users")
             
-    except PairNotFound: await update.message.reply_text(f"❌ لم يتم العثور على العملة: {sym}")
-    except NoData: await update.message.reply_text("⚠️ البيانات غير متوفرة")
-    except Exception: log.exception("handle"); await update.message.reply_text("⚠️ حدث خطأ")
+    except PairNotFound: 
+        await update.message.reply_text(f"❌ لم يتم العثور على العملة: {sym}")
+    except NoData: 
+        await update.message.reply_text("⚠️ البيانات غير متوفرة")
+    except Exception: 
+        log.exception("handle")
+        await update.message.reply_text("⚠️ حدث خطأ")
     finally:
         try: await wait.delete()
         except Exception: pass
