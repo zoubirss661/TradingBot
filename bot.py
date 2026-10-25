@@ -2608,8 +2608,9 @@ async def handle_symbol(update, raw, to_channel=False):
             
         # Add points for analysis
         with store.lock:
-            store.data["users"][str(user_id)].setdefault("points",0) += 2
-            store.save("users")
+            uid_str = str(update.effective_user.id)
+if uid_str in store.data["users"]:
+    store.data["users"][uid_str]["points"] = store.data["users"][uid_str].get("points", 0) + 2
             
     except PairNotFound: await update.message.reply_text(f"❌ لم يتم العثور على العملة: {sym}")
     except NoData: await update.message.reply_text("⚠️ البيانات غير متوفرة")
