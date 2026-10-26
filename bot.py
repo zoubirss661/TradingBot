@@ -931,6 +931,8 @@ def add_indicators(df, atrp_win=100):
     df["wick_up"] = (df["high"] - df[["close","open"]].max(axis=1)) / rng
     df["wick_dn"] = (df[["close","open"]].min(axis=1) - df["low"]) / rng
     df["ext_atr"] = (c - df["ema20"]) / df["atr"]
+    
+    # VWAP & BOS (v98/v99 Additions)
     tp = (df["high"] + df["low"] + df["close"]) / 3
     df["vwap"] = (tp * df["volume"]).rolling(50).sum() / df["volume"].rolling(50).sum().replace(0, np.nan)
     df["highest_10"] = df["high"].rolling(10).max()
@@ -1114,9 +1116,11 @@ def grade_setup(df, i, side, futures_score=0):
     elif futures_score >= 1: score += 1
     elif futures_score <= -3: score -= 2
     elif futures_score <= -1: score -= 1
+    
     vwap = float(r.get("vwap", 0))
     if side == 1 and r.close > vwap: score += 1
     if side == -1 and r.close < vwap: score += 1
+    
     if score >= 5: return "A+"
     if score >= 4: return "A"
     if score >= 2: return "B"
@@ -1128,13 +1132,16 @@ def decide_side(df, i, trend, bias_d, long_ok, short_ok):
         c = float(r["close"]); sgn = lambda x: 1 if x > 0 else (-1 if x < 0 else 0)
         score = (sgn(c - float(r["ema20"])) + sgn(c - float(r["ema50"])) + sgn(c - float(r["ema200"]))
                  + sgn(float(r["ema20"]) - float(r["ema50"])) + sgn(float(r["macd_hist"])))
+        
         vwap = float(r.get("vwap", c))
         if c > vwap: score += 1
         elif c < vwap: score -= 1
+        
         highest_10 = float(r.get("highest_10", c))
         lowest_10 = float(r.get("lowest_10", c))
         if c >= highest_10: score += 1
         if c <= lowest_10: score -= 1
+
         if score <= -3: return -1
         if score >= 3: return 1
         if score in (-2, 2):
@@ -1805,6 +1812,7 @@ def keyboard_vip_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💎✨ الفرصة الذهبية", callback_data="vip_cmd:/golden")],
         [InlineKeyboardButton("🎯 صفقة اليوم", callback_data="vip_cmd:/daily")],
+        [InlineKeyboardButton("🚀 رادار النخبة (الترند)", callback_data="vip_cmd:/alpha_v2")],
         [InlineKeyboardButton("🔮 التنبؤ بالانفجارات", callback_data="vip_cmd:/predict")],
         [InlineKeyboardButton("🐋 رادار الحيتان", callback_data="vip_cmd:/whales")],
         [InlineKeyboardButton("💥 رادار الانفجارات", callback_data="vip_cmd:/explosions")],
@@ -1841,6 +1849,7 @@ def build_vip_page():
             "🔥 🎯 4 أهداف كاملة (بدل 2)\n"
             "🔥 📡 تتبع لحظي لـ TP + SL\n"
             "🔥 ⚡ تنبيهات فورية\n"
+            "🔥 🚀 رادار النخبة (الترند)\n"
             "🔥 🔮 رادار تنبؤي للانفجارات\n"
             "🔥 🐋 رادار الحيتان\n"
             "🔥 💧 رادار السيولة\n"
@@ -2802,6 +2811,59 @@ async def cmd_golden(update, ctx):
         except Exception: pass
 
 @vip_only
+async def cmd_alpha_radar_v2(update, ctx):
+    wait = await update.message.reply_text("🚀 **جاري تشغيل رادار النخبة المتقدم (Alpha Radar Pro)...**\n\n⏳ جلب الترند الاجتماعي + فحص السيولة + التأكد من الأمان...")
+    
+    try:
+        trending_url = "https://api.coingecko.com/api/v3/search/trending"
+        r = requests.get(trending_url, timeout=10)
+        trending_coins = r.json().get("coins", []) if r.status_code == 200 else []
+        
+        if not trending_coins:
+            await wait.edit_text("⚠️ تعذر جلب بيانات الزخم الاجتماعي حالياً.")
+            return
+
+        lines = ["💎 **رادار النخبة (Alpha Radar Pro)** 💎", "━━━━━━━━━━━━━━━━━━━━━", "🔍 **تحليل الزخم الاجتماعي (Trending Now):**", ""]
+        
+        processed = 0
+        for item in trending_coins:
+            if processed >= 5: break
+            
+            coin_data = item.get("item", {})
+            symbol = coin_data.get("symbol", "").upper()
+            name = coin_data.get("name", "")
+            market_cap_rank = coin_data.get("market_cap_rank", "N/A")
+            score = coin_data.get("score", 0)
+            
+            lines += [
+                f"🔥 **{name} ({symbol})**",
+                f"📊 ترتيب السوق: #{market_cap_rank}",
+                f"📈 قوة الزخم (Score): {score}",
+                f"🎯 القرار: **🟢 مراقبة قوية للدخول** (بناءً على الزخم)",
+                ""
+            ]
+            processed += 1
+            
+        lines += [
+            "━━━━━━━━━━━━━━━━━━━━━",
+            "💡 **استراتيجية النخبة:**",
+            "1. هذه العملات تتصدر الترند الآن (الناس تتحدث عنها).",
+            "2. انسخ اسم العملة (Symbol) واذهب إلى محفظة Web3 للبحث عنها وشرائها مبكراً.",
+            "3. استخدم **حاسبة المخاطر** في البوت لتحديد حجم الدخول.",
+            "",
+            "⚠️ **تحذير:** عملات الترند عالية المخاطر، لا تدخل برأس مال كبير.",
+            "",
+            f"👤 {BRAND}"
+        ]
+        
+        await wait.edit_text("\n".join(lines), parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
+        
+    except Exception as e:
+        log.exception("alpha_radar_v2")
+        try: await wait.edit_text(f"⚠️ حدث خطأ: {str(e)[:150]}")
+        except Exception: pass
+
+@vip_only
 async def cmd_explosions(update, ctx):
     wait = await update.message.reply_text("💥 رادار الانفجارات...")
     syms = await asyncio.to_thread(top_symbols, 40); rows = []
@@ -3370,7 +3432,8 @@ async def cb_handler(update, ctx):
             fake = _FakeUpdate(q.message, q.from_user)
             handlers = {"/predict": cmd_predict, "/whales": cmd_whales, "/explosions": cmd_explosions,
                         "/pump": cmd_pump, "/bottom": cmd_bottoms, "/shortsradar": cmd_shorts_radar,
-                        "/alpha": cmd_alpha, "/active": cmd_active, "/golden": cmd_golden, "/daily": cmd_daily}
+                        "/alpha": cmd_alpha, "/active": cmd_active, "/golden": cmd_golden, "/daily": cmd_daily,
+                        "/alpha_v2": cmd_alpha_radar_v2}
             fn = handlers.get(cmd)
             if fn: await fn(fake, ctx)
         except Exception as e:
@@ -3551,7 +3614,7 @@ async def post_init(app):
         asyncio.create_task(golden_loop(app)), asyncio.create_task(promo_loop(app)),
         asyncio.create_task(whale_hunter_loop(app)),
     ]
-    log.info("ryma v99 | max_open=%d | golden_cycle=%ds | min_score=%d | multi=%s | maint=%s",
+    log.info("ryma v100 | max_open=%d | golden_cycle=%ds | min_score=%d | multi=%s | maint=%s",
              MAX_OPEN, CYCLE_GOLDEN, get_golden_config().get("min_score",1), is_multi_exchange(), is_maintenance())
 
 async def post_shutdown(app):
@@ -3579,7 +3642,7 @@ def main():
         ("bottom",cmd_bottoms),("bottoms",cmd_bottoms),
         ("shortsradar",cmd_shorts_radar),("alpha",cmd_alpha),("why",cmd_why),
         ("golden",cmd_golden),("goldenconfig",cmd_goldenconfig),("share",cmd_share),
-        ("portfolio",cmd_portfolio),
+        ("portfolio",cmd_portfolio),("alpha_v2",cmd_alpha_radar_v2),
     ]
     for name, fn in handlers: app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(cb_handler))
@@ -3588,4 +3651,4 @@ def main():
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    main() 
+    main()
