@@ -931,8 +931,6 @@ def add_indicators(df, atrp_win=100):
     df["wick_up"] = (df["high"] - df[["close","open"]].max(axis=1)) / rng
     df["wick_dn"] = (df[["close","open"]].min(axis=1) - df["low"]) / rng
     df["ext_atr"] = (c - df["ema20"]) / df["atr"]
-    
-    # VWAP & BOS (v98/v99 Additions)
     tp = (df["high"] + df["low"] + df["close"]) / 3
     df["vwap"] = (tp * df["volume"]).rolling(50).sum() / df["volume"].rolling(50).sum().replace(0, np.nan)
     df["highest_10"] = df["high"].rolling(10).max()
@@ -1812,7 +1810,7 @@ def keyboard_vip_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💎✨ الفرصة الذهبية", callback_data="vip_cmd:/golden")],
         [InlineKeyboardButton("🎯 صفقة اليوم", callback_data="vip_cmd:/daily")],
-        [InlineKeyboardButton("🚀 رادار النخبة (الترند)", callback_data="vip_cmd:/alpha_v2")],
+        [InlineKeyboardButton("🚀 رادار النخبة (الترند)", callback_data="vip_cmd:/alpha_v2")], # 🚨 التعديل الجديد
         [InlineKeyboardButton("🔮 التنبؤ بالانفجارات", callback_data="vip_cmd:/predict")],
         [InlineKeyboardButton("🐋 رادار الحيتان", callback_data="vip_cmd:/whales")],
         [InlineKeyboardButton("💥 رادار الانفجارات", callback_data="vip_cmd:/explosions")],
@@ -2811,7 +2809,7 @@ async def cmd_golden(update, ctx):
         except Exception: pass
 
 @vip_only
-async def cmd_alpha_radar_v2(update, ctx):
+async def cmd_alpha_radar_v2(update, ctx): # 🚨 التعديل الجديد: دالة رادار النخبة
     wait = await update.message.reply_text("🚀 **جاري تشغيل رادار النخبة المتقدم (Alpha Radar Pro)...**\n\n⏳ جلب الترند الاجتماعي + فحص السيولة + التأكد من الأمان...")
     
     try:
@@ -3433,7 +3431,7 @@ async def cb_handler(update, ctx):
             handlers = {"/predict": cmd_predict, "/whales": cmd_whales, "/explosions": cmd_explosions,
                         "/pump": cmd_pump, "/bottom": cmd_bottoms, "/shortsradar": cmd_shorts_radar,
                         "/alpha": cmd_alpha, "/active": cmd_active, "/golden": cmd_golden, "/daily": cmd_daily,
-                        "/alpha_v2": cmd_alpha_radar_v2}
+                        "/alpha_v2": cmd_alpha_radar_v2} # 🚨 التعديل الجديد
             fn = handlers.get(cmd)
             if fn: await fn(fake, ctx)
         except Exception as e:
@@ -3642,7 +3640,7 @@ def main():
         ("bottom",cmd_bottoms),("bottoms",cmd_bottoms),
         ("shortsradar",cmd_shorts_radar),("alpha",cmd_alpha),("why",cmd_why),
         ("golden",cmd_golden),("goldenconfig",cmd_goldenconfig),("share",cmd_share),
-        ("portfolio",cmd_portfolio),("alpha_v2",cmd_alpha_radar_v2),
+        ("portfolio",cmd_portfolio),("alpha_v2",cmd_alpha_radar_v2), # 🚨 التعديل الجديد
     ]
     for name, fn in handlers: app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(cb_handler))
