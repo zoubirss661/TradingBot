@@ -390,7 +390,8 @@ def points_visual(pts, threshold=VIP_THRESHOLD):
         bar, status = "🔴🔴⚪⚪⚪⚪⚪⚪⚪⚪", "🚀 ابدأ الجمع"
     return f"{bar}\n<b>{pts}/{threshold}</b> — {status}"
 
-async def send_points_flash(msg_obj, pts, uid):
+async def send_points_flash(msg_obj, pts, uid, bot_username=None):
+    """يرسل النقاط بتأثير وميض 🔴↔🟡 + الروابط الجاهزة للنسخ"""
     base = "🎯 نقاطك: {c} <b>{p}/{t}</b>"
     try:
         sent = await msg_obj.reply_text(
@@ -403,12 +404,18 @@ async def send_points_flash(msg_obj, pts, uid):
             try: await sent.edit_text(base.format(c=c, p=pts, t=VIP_THRESHOLD), parse_mode=ParseMode.HTML)
             except Exception: break
         await asyncio.sleep(0.35)
+
+        ref_link = f"https://t.me/{bot_username}?start=ref_{uid}" if bot_username else "—"
         final = (
             f"🎯 نقاطك: <b>{pts}/{VIP_THRESHOLD}</b>\n"
             f"{points_visual(pts)}\n\n"
-            f"🎁 شارك رابطك → <b>+{POINTS_PROMO} نقاط</b> (للعلم)\n"
-            f"👥 جب مشترك جديد → <b>+{POINTS_REFERRAL} نقطة</b>\n"
-            f"🎯 عند الوصول لـ {VIP_THRESHOLD} = <b>VIP {VIP_REWARD_DAYS} يوم مجاناً</b>"
+            f"📢 <b>نشر رابط القناة أو البوت = {POINTS_PROMO} نقاط</b>\n"
+            f"👥 <b>دعوة مشترك جديد = {POINTS_REFERRAL} نقطة</b>\n\n"
+            f"🔗 <b>رابط البوت (إحالتك):</b>\n"
+            f"<code>{ref_link}</code>\n\n"
+            f"📢 <b>قناة التوصيات:</b>\n"
+            f"<code>{CHANNEL_LINK}</code>\n\n"
+            f"🎁 عند الوصول لـ {VIP_THRESHOLD} = <b>VIP {VIP_REWARD_DAYS} يوم مجاناً</b>"
         )
         try: await sent.edit_text(final, parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
         except Exception: pass
@@ -2757,9 +2764,9 @@ async def handle_symbol(update, raw, to_channel=False):
                                          protect_content=(st!="admin" and PROTECT), reply_markup=kb)
         if st == "admin":
             await send_admin_copy(update.message, res)
-        # 🎯 عرض النقاط
         cur_pts = store.data["users"].get(str(update.effective_user.id), {}).get("points", 0)
-        await send_points_flash(update.message, cur_pts, update.effective_user.id)
+        bot_un = ctx.application.bot_data.get("username", "") if hasattr(ctx, "application") else ""
+        await send_points_flash(update.message, cur_pts, update.effective_user.id, bot_un)
     except PairNotFound:
         await update.message.reply_text(f"❌ لم يتم العثور على العملة: {sym}")
     except NoData:
@@ -2803,7 +2810,6 @@ async def cmd_start(update, ctx):
 
     rec = touch_user(u, "/start")
     st, day = user_status(u.id, rec)
-    # 🎯 فحص المكافأة (بعد الدخول اليومي)
     reward_pts, reward_days = check_points_reward(u.id)
     if reward_days:
         try:
@@ -2833,9 +2839,9 @@ async def cmd_start(update, ctx):
         f"أرسل اسم أي عملة لتحليلها.\n\n"
         f"{points_visual(rec.get('points', 0))}\n\n"
         f"📌 <b>طرق جمع النقاط:</b>\n"
-        f"• دخول يومي: <b>+{POINTS_DAILY}</b>\n"
-        f"• مشترك جديد: <b>+{POINTS_REFERRAL}</b>\n"
-        f"• مشاركة رابط: +{POINTS_PROMO} (للعلم)\n\n"
+        f"• دخول يومي = <b>{POINTS_DAILY}</b>\n"
+        f"• نشر رابط القناة أو البوت = <b>{POINTS_PROMO} نقاط</b>\n"
+        f"• دعوة مشترك جديد = <b>{POINTS_REFERRAL} نقطة</b>\n\n"
         f"🎁 {VIP_THRESHOLD} نقطة = VIP {VIP_REWARD_DAYS} يوم مجاناً"
         f"{ref_text}",
         reply_markup=InlineKeyboardMarkup(rows),
@@ -2942,7 +2948,7 @@ async def cmd_myref(update, ctx):
     await update.message.reply_text(
         f"🔗 <b>رابط الإحالة الخاص بك:</b>\n\n"
         f"<code>{ref_link}</code>\n\n"
-        f"💰 كل مشترك جديد = <b>+{POINTS_REFERRAL} نقطة</b>\n\n"
+        f"💰 كل مشترك جديد = <b>{POINTS_REFERRAL} نقطة</b>\n\n"
         f"🎯 نقاطك: <b>{pts}/{VIP_THRESHOLD}</b>\n"
         f"{points_visual(pts)}",
         parse_mode=ParseMode.HTML,
@@ -2953,15 +2959,20 @@ async def cmd_points(update, ctx):
     u = update.effective_user
     rec = store.data["users"].get(str(u.id), {})
     pts = rec.get("points", 0)
+    bot_username = ctx.application.bot_data.get("username", "")
+    ref_link = f"https://t.me/{bot_username}?start=ref_{u.id}" if bot_username else "—"
     await update.message.reply_text(
         f"🎯 <b>نقاطك:</b> {pts}/{VIP_THRESHOLD}\n\n"
         f"{points_visual(pts)}\n\n"
-        f"📌 <b>طرق الجمع:</b>\n"
-        f"• دخول يومي: <b>+{POINTS_DAILY}</b>\n"
-        f"• مشترك جديد: <b>+{POINTS_REFERRAL}</b>\n"
-        f"• مشاركة رابط: +{POINTS_PROMO} (للعلم)\n\n"
-        f"🎁 عند {VIP_THRESHOLD} = VIP {VIP_REWARD_DAYS} يوم\n"
-        f"🔗 /myref — رابطك",
+        f"📌 <b>طرق جمع النقاط:</b>\n"
+        f"• دخول يومي = <b>{POINTS_DAILY}</b>\n"
+        f"• نشر رابط القناة أو البوت = <b>{POINTS_PROMO} نقاط</b>\n"
+        f"• دعوة مشترك جديد = <b>{POINTS_REFERRAL} نقطة</b>\n\n"
+        f"🔗 <b>رابط البوت (إحالتك):</b>\n"
+        f"<code>{ref_link}</code>\n\n"
+        f"📢 <b>قناة التوصيات:</b>\n"
+        f"<code>{CHANNEL_LINK}</code>\n\n"
+        f"🎁 عند {VIP_THRESHOLD} نقطة = <b>VIP {VIP_REWARD_DAYS} يوم مجاناً</b>",
         parse_mode=ParseMode.HTML
     )
 
@@ -3371,7 +3382,6 @@ async def cmd_patterns(update, ctx):
             await wait.edit_text(f"⚠️ {str(e)[:150]}")
         return
 
-    # 🚀 فحص تلقائي
     wait = await update.message.reply_text(
         "🕯️ <b>جاري فحص النماذج على كل العملات النشطة وكل الفريمات...</b>\n\n⏳ قد يستغرق 30-60 ثانية",
         parse_mode=ParseMode.HTML
@@ -3769,12 +3779,18 @@ async def cb_handler(update, ctx):
     if q.data == "my_points":
         rec = store.data["users"].get(str(q.from_user.id), {})
         pts = rec.get("points", 0)
+        bot_username = ctx.application.bot_data.get("username", "")
+        ref_link = f"https://t.me/{bot_username}?start=ref_{q.from_user.id}" if bot_username else "—"
         await q.message.reply_text(
             f"🎯 <b>نقاطك:</b> {pts}/{VIP_THRESHOLD}\n\n"
             f"{points_visual(pts)}\n\n"
-            f"🎁 عند {VIP_THRESHOLD} = VIP {VIP_REWARD_DAYS} يوم\n"
-            f"🔗 /myref — رابطك",
-            parse_mode=ParseMode.HTML
+            f"📢 <b>نشر رابط القناة أو البوت = {POINTS_PROMO} نقاط</b>\n"
+            f"👥 <b>دعوة مشترك جديد = {POINTS_REFERRAL} نقطة</b>\n\n"
+            f"🔗 <b>رابط البوت (إحالتك):</b>\n"
+            f"<code>{ref_link}</code>\n\n"
+            f"📢 <b>قناة التوصيات:</b>\n"
+            f"<code>{CHANNEL_LINK}</code>",
+            parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW
         )
         return
 
@@ -3787,7 +3803,7 @@ async def cb_handler(update, ctx):
         pts = rec.get("points", 0)
         await q.message.reply_text(
             f"🔗 <b>رابط الإحالة:</b>\n\n<code>{ref_link}</code>\n\n"
-            f"💰 كل مشترك جديد = <b>+{POINTS_REFERRAL} نقطة</b>\n\n"
+            f"💰 كل مشترك جديد = <b>{POINTS_REFERRAL} نقطة</b>\n\n"
             f"🎯 نقاطك: <b>{pts}/{VIP_THRESHOLD}</b>\n"
             f"{points_visual(pts)}",
             parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW
@@ -4010,7 +4026,8 @@ async def cb_handler(update, ctx):
             if tier == "admin":
                 await send_admin_copy(q.message, res)
             cur_pts = store.data["users"].get(str(q.from_user.id), {}).get("points", 0)
-            await send_points_flash(q.message, cur_pts, q.from_user.id)
+            bot_un = ctx.application.bot_data.get("username", "")
+            await send_points_flash(q.message, cur_pts, q.from_user.id, bot_un)
         except Exception: pass
 
 async def on_error(update, ctx):
@@ -4083,9 +4100,10 @@ async def on_text(update, ctx):
         if tier == "admin":
             await send_admin_copy(update.message, res)
 
-        # 🎯 نقاطك (وميض + شريط تقدم)
+        # 🎯 نقاطك (وميض + شريط تقدم + روابط)
         cur_pts = store.data["users"].get(uid, {}).get("points", 0)
-        await send_points_flash(update.message, cur_pts, update.effective_user.id)
+        bot_un = ctx.application.bot_data.get("username", "")
+        await send_points_flash(update.message, cur_pts, update.effective_user.id, bot_un)
 
     except PairNotFound:
         await update.message.reply_text(f"❌ لم يتم العثور على العملة: {sym}")
@@ -4133,7 +4151,7 @@ async def post_init(app):
         asyncio.create_task(golden_loop(app)), asyncio.create_task(promo_loop(app)),
         asyncio.create_task(whale_hunter_loop(app)),
     ]
-    log.info("ryma v102 | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF",
+    log.info("ryma v103 | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | links=inline",
              MAX_OPEN, CYCLE_GOLDEN, get_golden_config().get("min_score",1), is_multi_exchange(),
              VIP_THRESHOLD, VIP_REWARD_DAYS)
 
