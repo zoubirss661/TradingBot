@@ -4189,6 +4189,467 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, on_text))
     app.add_error_handler(on_error)
     app.run_polling(drop_pending_updates=True)
+  # ══════════════════════════════════════════════════════════════════
+# 🌐 BILINGUAL ADDON — paste BEFORE "if __name__ == '__main__':"
+# ══════════════════════════════════════════════════════════════════
+
+TR = {
+"ar": {
+"welcome":"أهلاً {name}! 👋\n\nأرسل اسم أي عملة لتحليلها.\n\n{visual}\n\n📌 <b>طرق جمع النقاط:</b>\n• دخول يومي = <b>{daily}</b>\n• نشر رابط = <b>{promo} نقاط</b>\n• دعوة = <b>{ref} نقطة</b>\n\n🎁 {threshold} نقطة = VIP {vip_days} يوم مجاناً{ref_text}",
+"ref_text":"\n\n🔗 رابطك:\n<code>{link}</code>",
+"lang_new":"🌐 تم اختيار لغتك تلقائياً: 🇸🇦 العربية",
+"btn_portfolio":"📊 محفظتي","btn_my_ref":"🔗 رابط الإحالة","btn_lang":"🌐 تغيير اللغة",
+"btn_vip":"💎 اشترك في VIP ✨","btn_channel":"🆓 قناة التوصيات","btn_contact":"📞 تواصل",
+"lang_title":"🌐 <b>اختر لغتك المفضلة</b>\n\nChoose your preferred language:",
+"lang_changed":"✅ تم تغيير اللغة إلى 🇸🇦 العربية",
+"help_free":"ℹ️ <b>مساعدة Ryma Crypto</b>\n\n📝 أرسل رمز عملة للتحليل\n🆔 /myid — رقم حسابك\n💎 /vip — معلومات VIP\n📈 /portfolio — محفظتي\n🎯 /points — نقاطي\n🔗 /myref — رابط الإحالة\n🌐 /lang — تغيير اللغة",
+"help_vip":"ℹ️ <b>مساعدة VIP</b>\n\n📝 أرسل رمز عملة → تحليل + 4 أهداف\n📋 /menu — قائمة VIP\n💎✨ /golden — الفرصة الذهبية\n🎯 /daily — صفقة اليوم\n📈 /portfolio — محفظتي\n🎯 /points — نقاطي\n🔗 /myref — رابط الإحالة\n🌐 /lang — تغيير اللغة",
+"points_header":"🎯 <b>نقاطك:</b> {pts}/{threshold}\n\n{visual}\n\n📌 <b>طرق الجمع:</b>\n• دخول يومي = <b>{daily}</b>\n• نشر رابط = <b>{promo} نقاط</b>\n• دعوة = <b>{ref} نقطة</b>\n\n🔗 <b>رابطك:</b>\n<code>{ref_link}</code>\n\n📢 <b>القناة:</b>\n<code>{channel}</code>\n\n🎁 عند {threshold} نقطة = <b>VIP {vip_days} يوم</b>",
+"ref_header":"🔗 <b>رابط الإحالة:</b>\n\n<code>{link}</code>\n\n💰 كل مشترك = <b>{ref} نقطة</b>\n\n🎯 نقاطك: <b>{pts}/{threshold}</b>\n{visual}",
+"ref_new_reward":"🎉 شخص جديد انضم!\n💰 +{ref} نقطة\n📊 رصيدك: {pts}/{threshold}",
+"ref_new_reward_vip":"🎉 شخص جديد انضم!\n💰 +{ref} نقطة\n📊 رصيدك: {pts}/{threshold}\n\n🎁 <b>مبروك!</b> → VIP {days} يوم!",
+"vip_reward":"🎉 <b>مبروك!</b> وصلت {threshold} نقطة\n✅ حصلت على <b>VIP {days} يوم مجاناً</b>!",
+"vip_locked":"🔒 لمشتركي VIP فقط","vip_btn":"💎 اشترك الآن ✨",
+"menu_title":"╭━━━ 💎 قائمة VIP 💎 ━━━╮\n┃ 🔥 كل الخدمات 🔥\n╰━━━━━━━━━━━━━━━╯\n\n🎯 اضغط للوصول المباشر\n\n📌 ملاحظات:\n• 💧 و 📊 يحتاجان الرمز\n• 🔗 إحالة = +20 نقطة\n\n╰━━━━━━━━━━━━━━━╯",
+"flash_title":"🎯 نقاطك: {c} <b>{pts}/{threshold}</b>",
+"flash_final":"🎯 نقاطك: <b>{pts}/{threshold}</b>\n{visual}\n\n📢 نشر رابط = {promo} نقاط\n👥 دعوة = {ref} نقطة\n\n🔗 <b>رابطك:</b>\n<code>{ref_link}</code>\n\n📢 <b>القناة:</b>\n<code>{channel}</code>\n\n🎁 عند {threshold} = <b>VIP {days} يوم</b>",
+"cap_header":"╭━━━ 💎 RYMA CRYPTO 💎 ━━━╮\n┃ 🎯 {side_word}\n┃ 📌 <a href='{link}'>#{sym}/USDT</a>\n┃ 📡 {source}\n┃ 🏆 {grade}\n╰━━━━━━━━━━━━━╯",
+"cap_entry":"💵 الدخول: {entry}","cap_sl":"🛑 وقف: {sl}",
+"cap_tp":"🎯 هدف {i}: {px}","cap_tp_x":"🏆 هدف {i}: {px}",
+"cap_vip_more":"💎 أهداف أكثر → VIP","cap_pat":"🕯 النموذج: {pats}",
+"cap_dec":"🎯 <b>القرار: {decision}</b>",
+"cap_box":"╔═══ ⚠️ تنبيهات ═══╗\n║ 📌 ليست كل الصفقات ناجحة\n║ 📌 إدارة المخاطر أساس\n║ 📌 ابحث قبل الدخول\n╚═════════════╝",
+"cap_footer":"📅 {ts}\n👤 {brand}",
+"buy_long":"🟢 شراء (LONG)","sell_short":"🔴 بيع (SHORT)","buy":"🟢 شراء","sell":"🔴 بيع",
+"btn_risk":"🧮 حاسبة المخاطر","btn_add_port":"📊 للمحفظة","btn_news":"📰 الأخبار",
+"btn_platforms":"🌐 المنصات","btn_share":"📤 مشاركة","btn_refresh":"🔄 تحديث",
+"err_generic":"⚠️ خطأ، حاول تاني","err_symbol":"📝 رمز صحيح","err_not_found":"❌ {sym} غير موجود",
+"loading_sym":"⏳ تحليل {sym}...",
+"risk_calc":"🧮 <b>حاسبة المخاطر ({sym})</b>\n\nأرسل: <code>1000 2</code>",
+"risk_result":"🧮 <b>نتيجة {sym}:</b>\n\n💰 ${cap}\n🛑 ${risk_amt}\n➡️ {size}\n💵 ${value}\n⚙️ {lev}x",
+"port_prompt":"📊 <b>إضافة {sym}</b>\n\nكم بالدولار؟","port_added":"✅ تمت إضافة {sym} (${amount})",
+},
+"en": {
+"welcome":"Welcome {name}! 👋\n\nSend any coin to analyze.\n\n{visual}\n\n📌 <b>Earn points:</b>\n• Daily = <b>{daily}</b>\n• Share = <b>{promo} pts</b>\n• Invite = <b>{ref} pts</b>\n\n🎁 {threshold} pts = {vip_days} free VIP day{ref_text}",
+"ref_text":"\n\n🔗 Your link:\n<code>{link}</code>",
+"lang_new":"🌐 Language set: 🇬🇧 English",
+"btn_portfolio":"📊 My Portfolio","btn_my_ref":"🔗 Referral","btn_lang":"🌐 Change Language",
+"btn_vip":"💎 Subscribe VIP ✨","btn_channel":"🆓 Free Signals","btn_contact":"📞 Contact",
+"lang_title":"🌐 <b>Choose your preferred language</b>\n\nاختر لغتك المفضلة:",
+"lang_changed":"✅ Language set to 🇬🇧 English",
+"help_free":"ℹ️ <b>Ryma Crypto Help</b>\n\n📝 Send any symbol to analyze\n🆔 /myid — your ID\n💎 /vip — VIP info\n📈 /portfolio — my portfolio\n🎯 /points — my points\n🔗 /myref — referral link\n🌐 /lang — change language",
+"help_vip":"ℹ️ <b>VIP Help</b>\n\n📝 Send symbol → analysis + 4 targets\n📋 /menu — VIP menu\n💎✨ /golden — Golden Setup\n🎯 /daily — Trade of the Day\n📈 /portfolio — my portfolio\n🎯 /points — my points\n🔗 /myref — referral link\n🌐 /lang — change language",
+"points_header":"🎯 <b>Your points:</b> {pts}/{threshold}\n\n{visual}\n\n📌 <b>Earn points:</b>\n• Daily = <b>{daily}</b>\n• Share = <b>{promo} pts</b>\n• Invite = <b>{ref} pts</b>\n\n🔗 <b>Your link:</b>\n<code>{ref_link}</code>\n\n📢 <b>Channel:</b>\n<code>{channel}</code>\n\n🎁 Reach {threshold} = <b>{vip_days} free VIP day</b>",
+"ref_header":"🔗 <b>Referral Link:</b>\n\n<code>{link}</code>\n\n💰 Each = <b>{ref} pts</b>\n\n🎯 Points: <b>{pts}/{threshold}</b>\n{visual}",
+"ref_new_reward":"🎉 Someone joined!\n💰 +{ref} pts\n📊 Balance: {pts}/{threshold}",
+"ref_new_reward_vip":"🎉 Someone joined!\n💰 +{ref} pts\n📊 Balance: {pts}/{threshold}\n\n🎁 <b>Congrats!</b> → {days} free VIP day!",
+"vip_reward":"🎉 <b>Congrats!</b> You reached {threshold} pts\n✅ Got <b>{days} free VIP day</b>!",
+"vip_locked":"🔒 VIP only","vip_btn":"💎 Subscribe Now ✨",
+"menu_title":"╭━━━ 💎 VIP MENU 💎 ━━━╮\n┃ 🔥 All services 🔥\n╰━━━━━━━━━━━━━━━╯\n\n🎯 Direct access\n\n📌 Notes:\n• 💧 & 📊 need symbol\n• 🔗 Referral = +20 pts\n\n╰━━━━━━━━━━━━━━━╯",
+"flash_title":"🎯 Your points: {c} <b>{pts}/{threshold}</b>",
+"flash_final":"🎯 Your points: <b>{pts}/{threshold}</b>\n{visual}\n\n📢 Share = {promo} pts\n👥 Invite = {ref} pts\n\n🔗 <b>Your link:</b>\n<code>{ref_link}</code>\n\n📢 <b>Channel:</b>\n<code>{channel}</code>\n\n🎁 Reach {threshold} = <b>{days} free VIP day</b>",
+"cap_header":"╭━━━ 💎 RYMA CRYPTO 💎 ━━━╮\n┃ 🎯 {side_word}\n┃ 📌 <a href='{link}'>#{sym}/USDT</a>\n┃ 📡 {source}\n┃ 🏆 {grade}\n╰━━━━━━━━━━━━━╯",
+"cap_entry":"💵 Entry: {entry}","cap_sl":"🛑 SL: {sl}",
+"cap_tp":"🎯 Target {i}: {px}","cap_tp_x":"🏆 Target {i}: {px}",
+"cap_vip_more":"💎 More targets → VIP","cap_pat":"🕯 Pattern: {pats}",
+"cap_dec":"🎯 <b>Decision: {decision}</b>",
+"cap_box":"╔═══ ⚠️ Warnings ═══╗\n║ 📌 Not every trade wins\n║ 📌 Risk mgmt is key\n║ 📌 Do your own research\n╚═════════════╝",
+"cap_footer":"📅 {ts}\n👤 {brand}",
+"buy_long":"🟢 Buy (LONG)","sell_short":"🔴 Sell (SHORT)","buy":"🟢 Buy","sell":"🔴 Sell",
+"btn_risk":"🧮 Risk Calc","btn_add_port":"📊 Portfolio","btn_news":"📰 News",
+"btn_platforms":"🌐 Platforms","btn_share":"📤 Share","btn_refresh":"🔄 Refresh",
+"err_generic":"⚠️ Error, retry","err_symbol":"📝 Valid symbol","err_not_found":"❌ {sym} not found",
+"loading_sym":"⏳ Analyzing {sym}...",
+"risk_calc":"🧮 <b>Risk Calc ({sym})</b>\n\nSend: <code>1000 2</code>",
+"risk_result":"🧮 <b>Result for {sym}:</b>\n\n💰 ${cap}\n🛑 ${risk_amt}\n➡️ {size}\n💵 ${value}\n⚙️ {lev}x",
+"port_prompt":"📊 <b>Add {sym}</b>\n\nAmount in USD?","port_added":"✅ Added {sym} (${amount})",
+},
+}
+
+def t(key, lang=None, **kw):
+    lang = lang if lang in ("ar","en") else "ar"
+    txt = (TR.get(lang,{}).get(key) or TR["ar"].get(key) or key)
+    try: return txt.format(**kw)
+    except: return txt
+
+def _detect_lang(user):
+    c = (getattr(user,"language_code","") or "").lower()
+    return "ar" if c.startswith("ar") else "en"
+
+def _get_lang(uid):
+    with store.lock:
+        u = store.data["users"].get(str(uid))
+        return (u.get("lang") if u else None) or "ar"
+
+def _set_lang(uid, lang):
+    if lang not in ("ar","en"): return False
+    with store.lock:
+        u = store.data["users"].get(str(uid))
+        if u is not None:
+            u["lang"] = lang; store.save("users"); return True
+    return False
+
+# ── Override touch_user to add lang ──
+_orig_touch = touch_user
+def touch_user(user, cmd="text"):
+    r = _orig_touch(user, cmd)
+    with store.lock:
+        u = store.data["users"].get(str(user.id))
+        if u is not None and "lang" not in u:
+            u["lang"] = _detect_lang(user)
+            u["_lang_new"] = True
+            store.save("users")
+    return r
+
+# ── Override points_visual ──
+def points_visual(pts, threshold=VIP_THRESHOLD, lang="ar"):
+    pct = pts/threshold if threshold>0 else 0
+    if pct>=1.0: bar = "🟢"*10
+    elif pct>=0.9: bar = "🟢"*9+"⚪"
+    elif pct>=0.7: bar = "🟢"*7+"⚪"*3
+    elif pct>=0.5: bar = "🟡"*5+"⚪"*5
+    elif pct>=0.3: bar = "🟠"*3+"⚪"*7
+    else: bar = "🔴"*2+"⚪"*8
+    return f"{bar}\n<b>{pts}/{threshold}</b>"
+
+# ── Override send_points_flash ──
+async def send_points_flash(msg_obj, pts, uid, bot_username=None, lang="ar"):
+    try:
+        sent = await msg_obj.reply_text(
+            t("flash_title",lang,c="🔴",pts=pts,threshold=VIP_THRESHOLD),
+            parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
+        for c in ["🟡","🔴","🟡"]:
+            await asyncio.sleep(0.35)
+            try: await sent.edit_text(t("flash_title",lang,c=c,pts=pts,threshold=VIP_THRESHOLD),parse_mode=ParseMode.HTML)
+            except: break
+        await asyncio.sleep(0.35)
+        rl = f"https://t.me/{bot_username}?start=ref_{uid}" if bot_username else "—"
+        final = t("flash_final",lang,pts=pts,threshold=VIP_THRESHOLD,
+            visual=points_visual(pts,VIP_THRESHOLD,lang),promo=POINTS_PROMO,
+            ref=POINTS_REFERRAL,ref_link=rl,channel=CHANNEL_LINK,days=VIP_REWARD_DAYS)
+        try: await sent.edit_text(final,parse_mode=ParseMode.HTML,link_preview_options=NO_PREVIEW)
+        except: pass
+    except Exception as e: log.warning(f"flash: {e}")
+
+# ── Override cmd_start ──
+async def cmd_start(update, ctx):
+    if is_maintenance() and update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text(f"🔧 Maintenance\n📞 {CONTACT_LINK}"); return
+    u = update.effective_user; uid = str(u.id)
+    if ctx.args and ctx.args[0].startswith("ref_"):
+        try:
+            rid = int(ctx.args[0][4:])
+            if rid != u.id and uid not in store.data["users"]:
+                aw = False
+                with store.lock:
+                    if str(rid) in store.data["users"]:
+                        store.data["users"][str(rid)]["points"] = store.data["users"][str(rid)].get("points",0) + POINTS_REFERRAL
+                        store.save("users"); aw = True
+                if aw:
+                    npts, rw = check_points_reward(rid)
+                    rlg = _get_lang(rid)
+                    try:
+                        k = "ref_new_reward_vip" if rw else "ref_new_reward"
+                        msg = t(k, rlg, ref=POINTS_REFERRAL, pts=npts, threshold=VIP_THRESHOLD, days=rw or VIP_REWARD_DAYS)
+                        await ctx.bot.send_message(rid, msg, parse_mode=ParseMode.HTML)
+                    except: pass
+        except: pass
+    rec = touch_user(u, "/start")
+    lg = rec.get("lang") or "ar"
+    _, rw = check_points_reward(u.id)
+    if rw:
+        try: await update.message.reply_text(t("vip_reward",lg,threshold=VIP_THRESHOLD,days=rw),parse_mode=ParseMode.HTML)
+        except: pass
+    bot_un = ctx.application.bot_data.get("username","")
+    rl = f"https://t.me/{bot_un}?start=ref_{u.id}" if bot_un else None
+    rows = [[InlineKeyboardButton(t("btn_portfolio",lg),callback_data="my_portfolio")]]
+    if rl:
+        rows.append([InlineKeyboardButton(t("btn_my_ref",lg),copy_text=CopyTextButton(text=rl))])
+    rows += [
+        [InlineKeyboardButton(t("btn_lang",lg),callback_data="lang_menu")],
+        [InlineKeyboardButton(t("btn_vip",lg),url=VIP_INVITE_LINK)],
+        [InlineKeyboardButton(t("btn_channel",lg),url=CHANNEL_LINK)],
+        [InlineKeyboardButton(t("btn_contact",lg),url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")],
+    ]
+    ref_text = t("ref_text",lg,link=rl) if rl else ""
+    welcome = t("welcome",lg,name=u.first_name or "",
+        visual=points_visual(rec.get("points",0),VIP_THRESHOLD,lg),
+        daily=POINTS_DAILY,promo=POINTS_PROMO,ref=POINTS_REFERRAL,
+        threshold=VIP_THRESHOLD,vip_days=VIP_REWARD_DAYS,ref_text=ref_text)
+    if rec.get("_lang_new"):
+        welcome = t("lang_new",lg) + "\n\n" + welcome
+        with store.lock:
+            if "_lang_new" in store.data["users"][uid]:
+                del store.data["users"][uid]["_lang_new"]; store.save("users")
+    await update.message.reply_text(welcome,reply_markup=InlineKeyboardMarkup(rows),
+        parse_mode=ParseMode.HTML,link_preview_options=NO_PREVIEW)
+
+async def cmd_lang(update, ctx):
+    lg = _get_lang(update.effective_user.id)
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🇸🇦 العربية",callback_data="lang_set_ar"),
+        InlineKeyboardButton("🇬🇧 English",callback_data="lang_set_en"),
+    ]])
+    await update.message.reply_text(t("lang_title",lg),reply_markup=kb,parse_mode=ParseMode.HTML,link_preview_options=NO_PREVIEW)
+
+async def cmd_help(update, ctx):
+    rec = touch_user(update.effective_user,"/help")
+    lg = rec.get("lang") or "ar"
+    st,_ = user_status(update.effective_user.id, rec)
+    k = "help_vip" if st in ("admin","vip") else "help_free"
+    await update.message.reply_text(t(k,lg),parse_mode=ParseMode.HTML)
+
+async def cmd_points(update, ctx):
+    u = update.effective_user; rec = touch_user(u,"/points")
+    lg = rec.get("lang") or "ar"; pts = rec.get("points",0)
+    bot_un = ctx.application.bot_data.get("username","")
+    rl = f"https://t.me/{bot_un}?start=ref_{u.id}" if bot_un else "—"
+    await update.message.reply_text(
+        t("points_header",lg,pts=pts,threshold=VIP_THRESHOLD,
+          visual=points_visual(pts,VIP_THRESHOLD,lg),daily=POINTS_DAILY,
+          promo=POINTS_PROMO,ref=POINTS_REFERRAL,ref_link=rl,
+          channel=CHANNEL_LINK,vip_days=VIP_REWARD_DAYS),
+        parse_mode=ParseMode.HTML)
+
+async def cmd_myref(update, ctx):
+    u = update.effective_user; rec = touch_user(u,"/myref")
+    lg = rec.get("lang") or "ar"
+    bot_un = ctx.application.bot_data.get("username","")
+    if not bot_un:
+        await update.message.reply_text(t("err_generic",lg)); return
+    rl = f"https://t.me/{bot_un}?start=ref_{u.id}"; pts = rec.get("points",0)
+    await update.message.reply_text(
+        t("ref_header",lg,link=rl,ref=POINTS_REFERRAL,pts=pts,
+          threshold=VIP_THRESHOLD,visual=points_visual(pts,VIP_THRESHOLD,lg)),
+        parse_mode=ParseMode.HTML,link_preview_options=NO_PREVIEW)
+
+async def cmd_menu(update, ctx):
+    rec = touch_user(update.effective_user,"/menu")
+    lg = rec.get("lang") or "ar"
+    st,_ = user_status(update.effective_user.id, rec)
+    if st == "admin":
+        await update.message.reply_text("👑 <b>Admin</b>",reply_markup=keyboard_admin_menu(),parse_mode=ParseMode.HTML)
+        return
+    if st not in ("vip","trial","warning"):
+        await update.message.reply_text(t("vip_locked",lg),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t("vip_btn",lg),url=VIP_INVITE_LINK)]]))
+        return
+    await update.message.reply_text(t("menu_title",lg),reply_markup=keyboard_vip_menu(),parse_mode=ParseMode.HTML)
+
+# ── Override caption_core ──
+def caption_core(res, tier="free", lang="ar"):
+    side, lv, sym = res["side"], res["lv"], res["sym"]
+    side_w = t("buy_long",lang) if side==1 else t("sell_short",lang)
+    dec = t("buy",lang) if side==1 else t("sell",lang)
+    cl = coin_link(sym, res.get("source","binance_fut"))
+    source = display_source(res.get("source","binance_fut"))
+    grade = res.get("grade","?")
+    lines = [t("cap_header",lang,side_word=side_w,link=cl,sym=sym,source=source,grade=grade),"",
+             t("cap_entry",lang,entry=fmt(lv["entry"])),
+             t("cap_sl",lang,sl=fmt(lv["sl"])),""]
+    n = 4 if tier in ("admin","vip") else 2
+    for i,tp in enumerate(lv["tps"][:n],1):
+        k = "cap_tp" if i<=2 else "cap_tp_x"
+        lines.append(t(k,lang,i=i,px=fmt(tp["px"])))
+    if tier=="free" and len(lv["tps"])>2:
+        lines += ["",t("cap_vip_more",lang)]
+    pats = res.get("patterns",[])
+    if pats:
+        pn = " | ".join(f"{p['name']}{'['+p.get('tf','').upper()+']' if p.get('tf') else ''} "
+            f"{'🟢' if p['bias']=='bullish' else ('🔴' if p['bias']=='bearish' else '⚪')}"
+            for p in pats[:2])
+        lines += ["",t("cap_pat",lang,pats=pn)]
+    lines += ["","━━━━━━━━",t("cap_dec",lang,decision=dec),"",
+              t("cap_box",lang),"",
+              t("cap_footer",lang,ts=dt.datetime.now().strftime("%Y-%m-%d %H:%M"),brand=BRAND)]
+    return "\n".join(lines)
+
+def caption_free(res): return caption_core(res,"free","ar")
+def caption_vip(res): return caption_core(res,"vip","ar")
+
+# ── Override keyboards ──
+def keyboard_free(sym, tf, source="binance_fut", lang="ar"):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t("btn_risk",lang),callback_data=f"calc_risk:{sym}"),
+         InlineKeyboardButton(t("btn_add_port",lang),callback_data=f"add_port:{sym}")],
+        [InlineKeyboardButton(t("btn_platforms",lang),callback_data=f"refs:{source}")],
+        [InlineKeyboardButton(t("btn_vip",lang),url=VIP_INVITE_LINK)],
+        [InlineKeyboardButton(t("btn_channel",lang),url=CHANNEL_LINK)],
+        [InlineKeyboardButton(t("btn_refresh",lang),callback_data=f"tf:{sym}:{tf}")],
+    ])
+
+def keyboard_vip(sym, tf, source="binance_fut", lang="ar"):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t("btn_risk",lang),callback_data=f"calc_risk:{sym}"),
+         InlineKeyboardButton(t("btn_add_port",lang),callback_data=f"add_port:{sym}")],
+        [InlineKeyboardButton(t("btn_share",lang),callback_data=f"share:{sym}")],
+        [InlineKeyboardButton(t("btn_platforms",lang),callback_data=f"refs:{source}")],
+        [InlineKeyboardButton(t("btn_refresh",lang),callback_data=f"tf:{sym}:{tf}")],
+    ])
+
+def keyboard(sym, tf, tier, source="binance_fut", lang="ar"):
+    if tier in ("vip","admin"): return keyboard_vip(sym,tf,source,lang)
+    return keyboard_free(sym,tf,source,lang)
+
+# ── Override on_text ──
+async def on_text(update, ctx):
+    if not update.message or not update.message.text: return
+    text = update.message.text.strip(); uid = str(update.effective_user.id)
+    rec = touch_user(update.effective_user)
+    lg = rec.get("lang") or "ar"
+    if "awaiting_risk" in ctx.user_data:
+        sym = ctx.user_data.pop("awaiting_risk")
+        try:
+            cap_, risk_pct = map(float, text.split())
+            res = await asyncio.to_thread(get_analysis, sym, True)
+            entry, sl = res["lv"]["entry"], res["lv"]["sl"]
+            rk = cap_*(risk_pct/100); diff = abs(entry-sl)
+            sz = rk/diff; val = sz*entry; lev = val/cap_ if cap_>0 else 0
+            msg = t("risk_result",lg,sym=sym,cap=cap_,risk_amt=round(rk,2),
+                size=round(sz,4),value=round(val,2),lev=round(lev,1))
+            await update.message.reply_text(msg,parse_mode=ParseMode.HTML)
+        except: await update.message.reply_text(t("err_generic",lg))
+        return
+    if "awaiting_port" in ctx.user_data:
+        sym = ctx.user_data.pop("awaiting_port")
+        try:
+            amt = float(text)
+            res = await asyncio.to_thread(get_analysis, sym, True)
+            with store.lock:
+                store.data["portfolios"].setdefault(uid,[]).append({"sym":sym,"entry":res["price"],"amount":amt})
+                store.save("portfolios")
+            await update.message.reply_text(t("port_added",lg,sym=sym,amount=amt))
+        except: await update.message.reply_text(t("err_generic",lg))
+        return
+    sym = clean_symbol(text)
+    if not sym:
+        await update.message.reply_text(t("err_symbol",lg)); return
+    wait = await update.message.reply_text(t("loading_sym",lg,sym=sym))
+    try:
+        res = await asyncio.to_thread(get_analysis, sym)
+        st,_ = user_status(update.effective_user.id, rec)
+        tier = "admin" if st=="admin" else ("vip" if st=="vip" else "free")
+        img = await asyncio.to_thread(render_chart, res, tier)
+        cap = caption_core(res, tier, lg)
+        kb = keyboard(sym, res["tf"], tier, res.get("source","binance_fut"), lg)
+        await update.message.reply_photo(photo=img, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
+        bot_un = ctx.application.bot_data.get("username","")
+        await send_points_flash(update.message, rec.get("points",0), update.effective_user.id, bot_un, lg)
+    except PairNotFound:
+        await update.message.reply_text(t("err_not_found",lg,sym=sym))
+    except NoData:
+        await update.message.reply_text(t("err_generic",lg))
+    except Exception:
+        log.exception("on_text")
+        await update.message.reply_text(t("err_generic",lg))
+    finally:
+        try: await wait.delete()
+        except: pass
+
+# ── Override cb_handler ──
+_orig_cb = cb_handler
+async def cb_handler(update, ctx):
+    q = update.callback_query
+    lg = _get_lang(q.from_user.id) if q else "ar"
+    if q and q.data == "lang_menu":
+        try: await q.answer()
+        except: pass
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🇸🇦 العربية",callback_data="lang_set_ar"),
+            InlineKeyboardButton("🇬🇧 English",callback_data="lang_set_en"),
+        ]])
+        try: await q.message.edit_text(t("lang_title",lg),reply_markup=kb,parse_mode=ParseMode.HTML,link_preview_options=NO_PREVIEW)
+        except: pass
+        return
+    if q and q.data and q.data.startswith("lang_set_"):
+        try: await q.answer()
+        except: pass
+        nl = q.data.split("_",2)[2]
+        if not _set_lang(q.from_user.id, nl):
+            await q.message.answer(t("err_generic",nl)); return
+        await q.message.answer(t("lang_changed",nl),parse_mode=ParseMode.HTML)
+        bu = ctx.application.bot_data.get("username","")
+        rl = f"https://t.me/{bu}?start=ref_{q.from_user.id}" if bu else None
+        rec = store.data["users"].get(str(q.from_user.id),{})
+        rows = [[InlineKeyboardButton(t("btn_portfolio",nl),callback_data="my_portfolio")]]
+        if rl:
+            rows.append([InlineKeyboardButton(t("btn_my_ref",nl),copy_text=CopyTextButton(text=rl))])
+        rows += [
+            [InlineKeyboardButton(t("btn_lang",nl),callback_data="lang_menu")],
+            [InlineKeyboardButton(t("btn_vip",nl),url=VIP_INVITE_LINK)],
+            [InlineKeyboardButton(t("btn_channel",nl),url=CHANNEL_LINK)],
+            [InlineKeyboardButton(t("btn_contact",nl),url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")],
+        ]
+        ref_text = t("ref_text",nl,link=rl) if rl else ""
+        welcome = t("welcome",nl,name=q.from_user.first_name or "",
+            visual=points_visual(rec.get("points",0),VIP_THRESHOLD,nl),
+            daily=POINTS_DAILY,promo=POINTS_PROMO,ref=POINTS_REFERRAL,
+            threshold=VIP_THRESHOLD,vip_days=VIP_REWARD_DAYS,ref_text=ref_text)
+        await q.message.answer(welcome,reply_markup=InlineKeyboardMarkup(rows),
+            parse_mode=ParseMode.HTML,link_preview_options=NO_PREVIEW)
+        return
+    if q and q.data and q.data.startswith("calc_risk:"):
+        try: await q.answer()
+        except: pass
+        sym = q.data.split(":",1)[1]
+        ctx.user_data["awaiting_risk"] = sym
+        await q.message.reply_text(t("risk_calc",lg,sym=sym),parse_mode=ParseMode.HTML)
+        return
+    if q and q.data and q.data.startswith("add_port:"):
+        try: await q.answer()
+        except: pass
+        sym = q.data.split(":",1)[1]
+        ctx.user_data["awaiting_port"] = sym
+        await q.message.reply_text(t("port_prompt",lg,sym=sym),parse_mode=ParseMode.HTML)
+        return
+    if q and q.data == "my_points":
+        try: await q.answer()
+        except: pass
+        rec = store.data["users"].get(str(q.from_user.id),{}); pts = rec.get("points",0)
+        bu = ctx.application.bot_data.get("username","")
+        rl = f"https://t.me/{bu}?start=ref_{q.from_user.id}" if bu else "—"
+        await q.message.reply_text(t("points_header",lg,pts=pts,threshold=VIP_THRESHOLD,
+            visual=points_visual(pts,VIP_THRESHOLD,lg),daily=POINTS_DAILY,promo=POINTS_PROMO,
+            ref=POINTS_REFERRAL,ref_link=rl,channel=CHANNEL_LINK,vip_days=VIP_REWARD_DAYS),
+            parse_mode=ParseMode.HTML,link_preview_options=NO_PREVIEW)
+        return
+    return await _orig_cb(update, ctx)
+
+# ── Override main to register /lang ──
+def main():
+    if not BOT_TOKEN: raise SystemExit("BOT_TOKEN not set")
+    store.start_flusher()
+    app = (ApplicationBuilder().token(BOT_TOKEN)
+           .post_init(post_init).post_shutdown(post_shutdown).build())
+    H = [
+        ("start",cmd_start),("help",cmd_help),("myid",cmd_myid),("vip",cmd_vip),
+        ("menu",cmd_menu),("daily",cmd_daily),("cross",cmd_cross),("predict",cmd_predict),
+        ("forcepost",cmd_forcepost),("clearsignals",cmd_clearsignals),
+        ("smartcleanup",cmd_smartcleanup),("debug",cmd_debug),("active",cmd_active),
+        ("post",cmd_post),("bt",cmd_bt),("backtest",cmd_bt),("bt50",cmd_bt50),
+        ("scan",cmd_scan),("short",cmd_short),("delist",cmd_delist),("price",cmd_price),
+        ("users",cmd_users),("testchannels",cmd_testchannels),("stats",cmd_stats),
+        ("history",cmd_history),("dashboard",cmd_dashboard),
+        ("addvip",cmd_addvip),("removevip",cmd_removevip),("viplist",cmd_viplist),
+        ("whales",cmd_whales),("liquidity",cmd_liquidity),("futures",cmd_futures),
+        ("explosions",cmd_explosions),("pump",cmd_pump),
+        ("bottom",cmd_bottoms),("bottoms",cmd_bottoms),
+        ("shortsradar",cmd_shorts_radar),("alpha",cmd_alpha),("why",cmd_why),
+        ("golden",cmd_golden),("goldenconfig",cmd_goldenconfig),("share",cmd_share),
+        ("portfolio",cmd_portfolio),("alpha_v2",cmd_alpha_radar_v2),
+        ("patterns",cmd_patterns),
+        ("points",cmd_points),("myref",cmd_myref),("addpoints",cmd_addpoints),
+        ("lang",cmd_lang),
+    ]
+    for n,f in H: app.add_handler(CommandHandler(n,f))
+    app.add_handler(CallbackQueryHandler(cb_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, on_text))
+    app.add_error_handler(on_error)
+    app.run_polling(drop_pending_updates=True)
+
+# ══════════════════════════════════════════════════════════════════
+# END BILINGUAL ADDON
+# ══════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     main()
