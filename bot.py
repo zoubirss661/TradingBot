@@ -105,7 +105,6 @@ WEAK_COINS = set()
 DAILY_EXCLUDE = {"BTC","ETH","BNB","SOL","XRP","DOGE","ADA","TRX","LTC","DOT","LINK","AVAX","TON","SHIB","PEPE","USDC","FDUSD","TUSD","USDT","DAI","BUSD","USDP","USDD","USDE","PYUSD","EUR","AEUR"} | EXCLUDE_TICKERS
 STABLES = DAILY_EXCLUDE
 
-# ═══════════ نظام النقاط ═══════════
 POINTS_DAILY = 1
 POINTS_PROMO = 5
 POINTS_REFERRAL = 20
@@ -283,6 +282,65 @@ class Store:
         threading.Thread(target=loop, daemon=True).start()
 store = Store()
 
+# ═══════════ نظام اللغة الثنائية (تلقائي) ═══════════
+def detect_lang(text: str) -> str:
+    if not text:
+        return "ar"
+    if re.search(r'[\u0600-\u06FF]', text):
+        return "ar"
+    if re.search(r'[a-zA-Z]', text):
+        return "en"
+    return "ar"
+
+def get_user_lang(uid) -> str:
+    with store.lock:
+        u = store.data["users"].get(str(uid), {})
+        return u.get("lang", "ar")
+
+def set_user_lang(uid, lang: str):
+    with store.lock:
+        if str(uid) in store.data["users"]:
+            store.data["users"][str(uid)]["lang"] = lang
+            store.save("users")
+
+TEXTS = {
+    "ar": {
+        "analyzing": "⏳ جارٍ تحليل {sym}...",
+        "not_found": "❌ لم يتم العثور على العملة: {sym}",
+        "no_data": "⚠️ البيانات غير متوفرة",
+        "error": "⚠️ حدث خطأ",
+        "invalid_symbol": "📝 إدخال رمز عملة صحيح",
+        "not_supported": "⛔ هذا الرمز غير مدعوم (أسهم أو غير متاح).",
+        "maintenance": "🔧 صيانة.\n📞 {contact}",
+        "blocked": "⛔ انتهت التجربة.\n📞 {contact}",
+        "warning_trial": "⚠️ تنبيه: التجربة تنتهي خلال {left} يوم.",
+        "wait_3s": "⏳ انتظار 3 ثوان",
+        "vip_only": "🔒 VIP فقط",
+        "admin_only": "⛔ للأدمن فقط",
+    },
+    "en": {
+        "analyzing": "⏳ Analyzing {sym}...",
+        "not_found": "❌ Coin not found: {sym}",
+        "no_data": "⚠️ Data not available",
+        "error": "⚠️ An error occurred",
+        "invalid_symbol": "📝 Please enter a valid coin symbol",
+        "not_supported": "⛔ This symbol is not supported (stocks or unavailable).",
+        "maintenance": "🔧 Maintenance.\n📞 {contact}",
+        "blocked": "⛔ Trial expired.\n📞 {contact}",
+        "warning_trial": "⚠️ Warning: Trial expires in {left} days.",
+        "wait_3s": "⏳ Please wait 3 seconds",
+        "vip_only": "🔒 VIP only",
+        "admin_only": "⛔ Admin only",
+    }
+}
+
+def t(key: str, lang: str = "ar", **kwargs) -> str:
+    text = TEXTS.get(lang, TEXTS["ar"]).get(key, TEXTS["ar"].get(key, key))
+    try:
+        return text.format(**kwargs)
+    except Exception:
+        return text
+
 def is_maintenance():
     with store.lock: return bool(store.data.get("settings", {}).get("maintenance", False))
 def set_maintenance(flag):
@@ -361,7 +419,6 @@ def time_ago(ts):
     if d < 604800: return f"{d//86400} يوم"
     return f"{d//604800} أسبوع"
 
-# ═══════════ دوال نظام النقاط ═══════════
 def check_points_reward(uid):
     with store.lock:
         u = store.data["users"].get(str(uid))
@@ -391,7 +448,6 @@ def points_visual(pts, threshold=VIP_THRESHOLD):
     return f"{bar}\n<b>{pts}/{threshold}</b> — {status}"
 
 async def send_points_flash(msg_obj, pts, uid, bot_username=None):
-    """يرسل النقاط بتأثير وميض 🔴↔🟡 + الروابط الجاهزة للنسخ"""
     base = "🎯 نقاطك: {c} <b>{p}/{t}</b>"
     try:
         sent = await msg_obj.reply_text(
@@ -422,7 +478,6 @@ async def send_points_flash(msg_obj, pts, uid, bot_username=None):
     except Exception as e:
         log.warning(f"send_points_flash: {e}")
 
-# ═══════════ جلب البيانات ═══════════
 def binance_futures_klines(sym, tf, bars=500):
     interval = BINANCE_INTERVAL_MAP.get(tf)
     if not interval: return None
@@ -1166,7 +1221,6 @@ def detect_meme_conditions(df, i, side):
         if float(r.close) >= rl: return False
     return True
 
-# ═══════════ كشف النماذج ═══════════
 def _find_pattern_pivots(df, left=5, right=5, max_pivots=8):
     highs, lows = [], []
     n = len(df)
@@ -1428,7 +1482,6 @@ def analyze(sym):
     try: fut = futures_score_for(sym, side)
     except Exception: fut = dict(score=0, details=[])
     fut_score = fut.get("score", 0)
-    # 🕯️ MTF pattern detection
     try:
         all_pats = []
         seen_names = set()
@@ -1821,7 +1874,6 @@ def build_social_text(res, platform="binance"):
     )
     return text
 
-# ═══════════ نسخة الأدمن للنسخ ═══════════
 def build_copy_post(res):
     side, lv, sym = res["side"], res["lv"], res["sym"]
     side_word = "LONG" if side == 1 else "SHORT"
@@ -1941,8 +1993,50 @@ def render_chart(res, tier="free", published=False):
     buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=130, facecolor=bg, bbox_inches="tight")
     plt.close(fig); buf.seek(0); return buf
 
-def caption_core(res, tier="free"):
+def caption_core(res, tier="free", lang="ar"):
     side, lv, sym = res["side"], res["lv"], res["sym"]
+
+    if lang == "en":
+        side_word = "🟢 LONG" if side == 1 else "🔴 SHORT"
+        decision = "🟢 Buy" if side == 1 else "🔴 Sell"
+        now_ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        source = display_source(res.get("source", "binance_fut"))
+        cl = coin_link(sym, res.get("source", "binance_fut"))
+        grade = res.get("grade", "?")
+        lines = [
+            "╭━━━ 💎 RYMA CRYPTO 💎 ━━━╮",
+            f"┃ 🎯 Signal: {side_word}",
+            f"┃ 📌 <a href='{cl}'>#{sym}/USDT</a> 👆 Click here",
+            f"┃ 📡 Source: {source}",
+            f"┃ 🏆 Grade: {grade}",
+            "╰━━━━━━━━━━━━━━━━━━━━━━━╯", "",
+            f"💵 Entry: {fmt(lv['entry'])}",
+            f"🛑 Stop Loss: {fmt(lv['sl'])}", "",
+        ]
+        n_tps = 4 if tier in ("admin","vip") else 2
+        for i,tp in enumerate(lv["tps"][:n_tps], 1):
+            emoji = "🎯" if i <= 2 else "🏆"
+            lines.append(f"{emoji} Target {i}: {fmt(tp['px'])}")
+        if tier == "free" and len(lv["tps"]) > 2:
+            lines += ["", "💎 For more targets → VIP"]
+        pats = res.get("patterns", [])
+        if pats:
+            lines.append("")
+            pat_names = " | ".join(
+                f"{p['name']}{'[' + p.get('tf','').upper() + ']' if p.get('tf') else ''} {'🟢' if p['bias']=='bullish' else ('🔴' if p['bias']=='bearish' else '⚪')}"
+                for p in pats[:2]
+            )
+            lines.append(f"🕯 Pattern: {pat_names}")
+        lines += ["", "━━━━━━━━━━━━━━━━", f"🎯 <b>Expected Decision: {decision}</b>"]
+        lines += ["", "╔═══════ ⚠️ Alerts ═══════╗",
+                  "║ 📌 Not all trades succeed",
+                  "║ 📌 Risk management is key",
+                  "║ 📌 Position size matters",
+                  "║ 📌 Do your own research",
+                  "╚═══════════════════════════╝",
+                  "", f"📅 {now_ts}", f"👤 {BRAND}"]
+        return "\n".join(lines)
+
     side_word = "🟢 شراء (LONG)" if side == 1 else "🔴 بيع (SHORT)"
     decision = "🟢 شراء" if side == 1 else "🔴 بيع"
     now_ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -1983,8 +2077,8 @@ def caption_core(res, tier="free"):
               "", f"📅 {now_ts}", f"👤 {BRAND}"]
     return "\n".join(lines)
 
-def caption_free(res): return caption_core(res, "free")
-def caption_vip(res): return caption_core(res, "vip")
+def caption_free(res, lang="ar"): return caption_core(res, "free", lang)
+def caption_vip(res, lang="ar"): return caption_core(res, "vip", lang)
 
 def keyboard_free(sym, tf, source="binance_fut"):
     return InlineKeyboardMarkup([
@@ -2222,7 +2316,7 @@ async def publish(bot, res, vip=True, free=False, admin_copy=False):
     try:
         if vip and VIP_CHANNEL_ID:
             img = await asyncio.to_thread(render_chart, res, "vip", True)
-            await bot.send_photo(VIP_CHANNEL_ID, img, caption=caption_vip(res),
+            await bot.send_photo(VIP_CHANNEL_ID, img, caption=caption_vip(res), 
                                  parse_mode=ParseMode.HTML, protect_content=PROTECT,
                                  reply_markup=keyboard_vip(res["sym"], res["tf"], source))
             sent.append("VIP")
@@ -2700,7 +2794,8 @@ def admin_only(fn):
     @functools.wraps(fn)
     async def wrapper(update, ctx):
         if not ADMIN_ID or not update.effective_user or update.effective_user.id != ADMIN_ID:
-            await update.message.reply_text("⛔ للأدمن فقط"); return
+            lang = get_user_lang(update.effective_user.id) if update.effective_user else "ar"
+            await update.message.reply_text(t("admin_only", lang)); return
         try: return await fn(update, ctx)
         except Exception as e:
             log.exception("admin"); await update.message.reply_text(f"⚠️ {str(e)[:200]}")
@@ -2711,11 +2806,12 @@ def vip_only(fn):
     async def wrapper(update, ctx):
         u = update.effective_user
         if not u: return
+        lang = get_user_lang(u.id)
         rec = store.data["users"].get(str(u.id), {})
         st, _ = user_status(u.id, rec)
         if st not in ("admin","vip","trial","warning"):
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 اشترك في VIP", url=VIP_INVITE_LINK)]])
-            await update.message.reply_text("🔒 VIP فقط", reply_markup=kb); return
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 اشترك في VIP" if lang=="ar" else "💎 Subscribe to VIP", url=VIP_INVITE_LINK)]])
+            await update.message.reply_text(t("vip_only", lang), reply_markup=kb); return
         try: return await fn(update, ctx)
         except Exception as e:
             log.exception("vip"); await update.message.reply_text(f"⚠️ {str(e)[:200]}")
@@ -2731,35 +2827,37 @@ _cooldown = {}
 
 async def gate(update):
     user = update.effective_user
+    lang = get_user_lang(user.id)
     if is_maintenance() and user.id != ADMIN_ID:
-        await update.message.reply_text(f"🔧 صيانة.\n📞 {CONTACT_LINK}"); return "maintenance", False
+        await update.message.reply_text(t("maintenance", lang, contact=CONTACT_LINK)); return "maintenance", False
     rec = touch_user(user); st, day = user_status(user.id, rec)
     if st == "blocked":
-        await update.message.reply_text(f"⛔ انتهت التجربة.\n📞 {CONTACT_LINK}"); return st, False
+        await update.message.reply_text(t("blocked", lang, contact=CONTACT_LINK)); return st, False
     if st == "warning":
         left = VIP_FORCE_DAY - day
-        await update.message.reply_text(f"⚠️ تنبيه: التجربة تنتهي خلال {left} يوم.")
+        await update.message.reply_text(t("warning_trial", lang, left=left))
     if st != "admin":
         if time.time() - _cooldown.get(user.id, 0) < 3:
-            await update.message.reply_text("⏳ انتظار 3 ثوان"); return st, False
+            await update.message.reply_text(t("wait_3s", lang)); return st, False
         _cooldown[user.id] = time.time()
     return st, True
 
 async def handle_symbol(update, raw, to_channel=False):
     st, ok = await gate(update)
     if not ok: return
+    lang = get_user_lang(update.effective_user.id)
     sym = clean_symbol(raw)
-    if not sym: await update.message.reply_text("📝 إدخال رمز عملة صحيح"); return
+    if not sym: await update.message.reply_text(t("invalid_symbol", lang)); return
     if sym in EXCLUDE_TICKERS:
-        await update.message.reply_text("⛔ هذا الرمز غير مدعوم (أسهم أو غير متاح)."); return
-    wait = await update.message.reply_text(f"⏳ جارٍ تحليل {sym}...")
+        await update.message.reply_text(t("not_supported", lang)); return
+    wait = await update.message.reply_text(t("analyzing", lang, sym=sym))
     try:
         res = await asyncio.to_thread(get_analysis, sym)
         tier = "admin" if st=="admin" else ("vip" if st=="vip" else "free")
         source = res.get("source", "binance_fut")
         kb = keyboard(sym, res["tf"], tier, source)
         img = await asyncio.to_thread(render_chart, res, tier)
-        cap = caption_vip(res) if tier in ("admin","vip") else caption_free(res)
+        cap = caption_core(res, "vip" if tier in ("admin","vip") else "free", lang)
         await update.message.reply_photo(photo=img, caption=cap, parse_mode=ParseMode.HTML,
                                          protect_content=(st!="admin" and PROTECT), reply_markup=kb)
         if st == "admin":
@@ -2768,23 +2866,24 @@ async def handle_symbol(update, raw, to_channel=False):
         bot_un = ctx.application.bot_data.get("username", "") if hasattr(ctx, "application") else ""
         await send_points_flash(update.message, cur_pts, update.effective_user.id, bot_un)
     except PairNotFound:
-        await update.message.reply_text(f"❌ لم يتم العثور على العملة: {sym}")
+        await update.message.reply_text(t("not_found", lang, sym=sym))
     except NoData:
-        await update.message.reply_text("⚠️ البيانات غير متوفرة")
+        await update.message.reply_text(t("no_data", lang))
     except Exception:
         log.exception("handle")
-        await update.message.reply_text("⚠️ حدث خطأ")
+        await update.message.reply_text(t("error", lang))
     finally:
         try: await wait.delete()
         except Exception: pass
 
 async def cmd_start(update, ctx):
     if is_maintenance() and update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text(f"🔧 صيانة.\n📞 {CONTACT_LINK}"); return
+        lang = get_user_lang(update.effective_user.id)
+        await update.message.reply_text(t("maintenance", lang, contact=CONTACT_LINK)); return
     u = update.effective_user
     uid = str(u.id)
+    lang = get_user_lang(u.id)
 
-    # 🔗 معالجة الإحالة
     if ctx.args and len(ctx.args) > 0 and ctx.args[0].startswith("ref_"):
         try:
             referrer_id = int(ctx.args[0][4:])
@@ -2801,9 +2900,13 @@ async def cmd_start(update, ctx):
                     if awarded:
                         new_pts, reward = check_points_reward(referrer_id)
                         try:
-                            msg = f"🎉 شخص جديد انضم عبر رابطك!\n💰 +{POINTS_REFERRAL} نقطة\n📊 رصيدك: {new_pts}/{VIP_THRESHOLD}"
-                            if reward:
-                                msg += f"\n\n🎁 <b>مبروك!</b> وصلت {VIP_THRESHOLD} → VIP {reward} يوم مجاناً!"
+                            ref_lang = get_user_lang(referrer_id)
+                            if ref_lang == "en":
+                                msg = f"🎉 Someone joined via your link!\n💰 +{POINTS_REFERRAL} points\n📊 Balance: {new_pts}/{VIP_THRESHOLD}"
+                                if reward: msg += f"\n\n🎁 <b>Congrats!</b> Reached {VIP_THRESHOLD} → VIP {reward} day free!"
+                            else:
+                                msg = f"🎉 شخص جديد انضم عبر رابطك!\n💰 +{POINTS_REFERRAL} نقطة\n📊 رصيدك: {new_pts}/{VIP_THRESHOLD}"
+                                if reward: msg += f"\n\n🎁 <b>مبروك!</b> وصلت {VIP_THRESHOLD} → VIP {reward} يوم مجاناً!"
                             await ctx.bot.send_message(referrer_id, msg, parse_mode=ParseMode.HTML)
                         except Exception: pass
         except Exception: pass
@@ -2813,54 +2916,79 @@ async def cmd_start(update, ctx):
     reward_pts, reward_days = check_points_reward(u.id)
     if reward_days:
         try:
-            await update.message.reply_text(
-                f"🎉 <b>مبروك!</b> وصلت {VIP_THRESHOLD} نقطة\n"
-                f"✅ حصلت على <b>VIP {reward_days} يوم مجاناً</b>!",
-                parse_mode=ParseMode.HTML
-            )
+            if lang == "en":
+                reward_msg = f"🎉 <b>Congrats!</b> Reached {VIP_THRESHOLD} points\n✅ You got <b>VIP {reward_days} day free</b>!"
+            else:
+                reward_msg = f"🎉 <b>مبروك!</b> وصلت {VIP_THRESHOLD} نقطة\n✅ حصلت على <b>VIP {reward_days} يوم مجاناً</b>!"
+            await update.message.reply_text(reward_msg, parse_mode=ParseMode.HTML)
         except Exception: pass
         rec["points"] = reward_pts
 
     bot_username = ctx.application.bot_data.get("username", "")
     ref_link = f"https://t.me/{bot_username}?start=ref_{u.id}" if bot_username else None
 
-    rows = [[InlineKeyboardButton("📊 محفظتي", callback_data="my_portfolio")]]
-    if ref_link:
-        rows.append([InlineKeyboardButton("🔗 رابط الإحالة", copy_text=CopyTextButton(text=ref_link))])
-    rows += [
-        [InlineKeyboardButton("💎 اشترك في VIP ✨", url=VIP_INVITE_LINK)],
-        [InlineKeyboardButton("🆓 قناة التوصيات", url=CHANNEL_LINK)],
-        [InlineKeyboardButton("📞 تواصل", url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")],
-    ]
+    if lang == "en":
+        rows = [[InlineKeyboardButton("📊 My Portfolio", callback_data="my_portfolio")]]
+        if ref_link:
+            rows.append([InlineKeyboardButton("🔗 Referral Link", copy_text=CopyTextButton(text=ref_link))])
+        rows += [
+            [InlineKeyboardButton("💎 Subscribe to VIP ✨", url=VIP_INVITE_LINK)],
+            [InlineKeyboardButton("🆓 Signals Channel", url=CHANNEL_LINK)],
+            [InlineKeyboardButton("📞 Contact", url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")],
+        ]
+        ref_text = f"\n\n🔗 Your link:\n<code>{ref_link}</code>" if ref_link else ""
+        welcome = (f"Welcome {u.first_name}! 👋\n\n"
+                   f"Send any coin symbol to analyze.\n\n"
+                   f"{points_visual(rec.get('points', 0))}\n\n"
+                   f"📌 <b>Ways to earn points:</b>\n"
+                   f"• Daily login = <b>{POINTS_DAILY}</b>\n"
+                   f"• Share channel/bot link = <b>{POINTS_PROMO} points</b>\n"
+                   f"• Invite new subscriber = <b>{POINTS_REFERRAL} points</b>\n\n"
+                   f"🎁 {VIP_THRESHOLD} points = VIP {VIP_REWARD_DAYS} day free{ref_text}")
+    else:
+        rows = [[InlineKeyboardButton("📊 محفظتي", callback_data="my_portfolio")]]
+        if ref_link:
+            rows.append([InlineKeyboardButton("🔗 رابط الإحالة", copy_text=CopyTextButton(text=ref_link))])
+        rows += [
+            [InlineKeyboardButton("💎 اشترك في VIP ✨", url=VIP_INVITE_LINK)],
+            [InlineKeyboardButton("🆓 قناة التوصيات", url=CHANNEL_LINK)],
+            [InlineKeyboardButton("📞 تواصل", url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")],
+        ]
+        ref_text = f"\n\n🔗 رابطك:\n<code>{ref_link}</code>" if ref_link else ""
+        welcome = (f"أهلاً {u.first_name}! 👋\n\n"
+                   f"أرسل اسم أي عملة لتحليلها.\n\n"
+                   f"{points_visual(rec.get('points', 0))}\n\n"
+                   f"📌 <b>طرق جمع النقاط:</b>\n"
+                   f"• دخول يومي = <b>{POINTS_DAILY}</b>\n"
+                   f"• نشر رابط القناة أو البوت = <b>{POINTS_PROMO} نقاط</b>\n"
+                   f"• دعوة مشترك جديد = <b>{POINTS_REFERRAL} نقطة</b>\n\n"
+                   f"🎁 {VIP_THRESHOLD} نقطة = VIP {VIP_REWARD_DAYS} يوم مجاناً{ref_text}")
 
-    ref_text = f"\n\n🔗 رابطك:\n<code>{ref_link}</code>" if ref_link else ""
-    await update.message.reply_text(
-        f"أهلاً {u.first_name}! 👋\n\n"
-        f"أرسل اسم أي عملة لتحليلها.\n\n"
-        f"{points_visual(rec.get('points', 0))}\n\n"
-        f"📌 <b>طرق جمع النقاط:</b>\n"
-        f"• دخول يومي = <b>{POINTS_DAILY}</b>\n"
-        f"• نشر رابط القناة أو البوت = <b>{POINTS_PROMO} نقاط</b>\n"
-        f"• دعوة مشترك جديد = <b>{POINTS_REFERRAL} نقطة</b>\n\n"
-        f"🎁 {VIP_THRESHOLD} نقطة = VIP {VIP_REWARD_DAYS} يوم مجاناً"
-        f"{ref_text}",
-        reply_markup=InlineKeyboardMarkup(rows),
-        parse_mode=ParseMode.HTML,
-        link_preview_options=NO_PREVIEW,
-    )
+    await update.message.reply_text(welcome, reply_markup=InlineKeyboardMarkup(rows),
+                                    parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
 
 async def cmd_help(update, ctx):
     touch_user(update.effective_user, "/help")
-    u = update.effective_user; rec = store.data["users"].get(str(u.id), {})
+    u = update.effective_user; lang = get_user_lang(u.id)
+    rec = store.data["users"].get(str(u.id), {})
     st, _ = user_status(u.id, rec)
     if st in ("admin","vip"):
         await update.message.reply_text(
             "ℹ️ <b>مساعدة VIP</b>\n\n📝 إرسال رمز عملة → تحليل + 4 أهداف\n"
             "📋 /menu — قائمة VIP\n💎✨ /golden — الفرصة الذهبية\n"
             "🎯 /daily — صفقة اليوم\n📊 /futures BTC — الفيوتشر\n"
-            "📈 /portfolio — محفظتي\n🎯 /points — نقاطي\n🔗 /myref — رابط الإحالة",
+            "📈 /portfolio — محفظتي\n🎯 /points — نقاطي\n🔗 /myref — رابط الإحالة"
+            if lang == "ar" else
+            "ℹ️ <b>VIP Help</b>\n\n📝 Send coin symbol → analysis + 4 targets\n"
+            "📋 /menu — VIP menu\n💎✨ /golden — Golden Setup\n"
+            "🎯 /daily — Daily trade\n📊 /futures BTC — Futures data\n"
+            "📈 /portfolio — My portfolio\n🎯 /points — My points\n🔗 /myref — Referral link",
             parse_mode=ParseMode.HTML); return
-    await update.message.reply_text("ℹ️ مساعدة Ryma Crypto\n\n📝 إرسال رمز عملة للتحليل\n🆔 /myid\n💎 /vip\n📈 /portfolio\n🎯 /points\n🔗 /myref")
+    await update.message.reply_text(
+        "ℹ️ مساعدة Ryma Crypto\n\n📝 إرسال رمز عملة للتحليل\n🆔 /myid\n💎 /vip\n📈 /portfolio\n🎯 /points\n🔗 /myref"
+        if lang == "ar" else
+        "ℹ️ Ryma Crypto Help\n\n📝 Send coin symbol to analyze\n🆔 /myid\n💎 /vip\n📈 /portfolio\n🎯 /points\n🔗 /myref"
+    )
 
 async def cmd_myid(update, ctx):
     touch_user(update.effective_user, "/myid")
@@ -4014,13 +4142,14 @@ async def cb_handler(update, ctx):
         user = touch_user(q.from_user, "refresh")
         st, _ = user_status(q.from_user.id, user)
         tier = "admin" if st=="admin" else ("vip" if st=="vip" else "free")
+        lang = get_user_lang(q.from_user.id)
         _candle_cache.pop((sym, tf, 450, 215, False), None); _analysis_cache.pop(sym, None)
         try:
             res = await asyncio.to_thread(get_analysis, sym)
             source = res.get("source", "binance_fut")
             kb = keyboard(sym, res["tf"], tier, source)
             img = await asyncio.to_thread(render_chart, res, tier)
-            cap = caption_vip(res) if tier in ("admin","vip") else caption_free(res)
+            cap = caption_core(res, "vip" if tier in ("admin","vip") else "free", lang)
             await ctx.bot.send_photo(q.message.chat.id, photo=img, caption=cap,
                                      protect_content=(st!="admin" and PROTECT), reply_markup=kb)
             if tier == "admin":
@@ -4038,6 +4167,9 @@ async def on_text(update, ctx):
     text = update.message.text.strip()
     uid = str(update.effective_user.id)
 
+    lang = detect_lang(text)
+    set_user_lang(update.effective_user.id, lang)
+
     if 'awaiting_risk' in ctx.user_data:
         sym = ctx.user_data.pop('awaiting_risk')
         try:
@@ -4050,18 +4182,29 @@ async def on_text(update, ctx):
             position_size = risk_amount / price_diff
             position_value = position_size * entry
             leverage = position_value / cap if cap > 0 else 0
-            msg = (
-                f"🧮 <b>نتيجة إدارة المخاطر لـ {sym}:</b>\n\n"
-                f"💰 رأس المال: ${cap}\n"
-                f"🛑 المخاطرة ({risk_pct}%): ${risk_amount:.2f}\n"
-                f"➡️ حجم العقد: {position_size:.4f}\n"
-                f"💵 قيمة الصفقة: ${position_value:.2f}\n\n"
-                f"⚙️ <b>الرافعة المقترحة:</b> {leverage:.1f}x\n"
-                f"<i>(استخدم دائماً العزل Isolated)</i>"
-            )
+            if lang == "en":
+                msg = (
+                    f"🧮 <b>Risk Management Result for {sym}:</b>\n\n"
+                    f"💰 Capital: ${cap}\n"
+                    f"🛑 Risk ({risk_pct}%): ${risk_amount:.2f}\n"
+                    f"➡️ Position Size: {position_size:.4f}\n"
+                    f"💵 Position Value: ${position_value:.2f}\n\n"
+                    f"⚙️ <b>Suggested Leverage:</b> {leverage:.1f}x\n"
+                    f"<i>(Always use Isolated margin)</i>"
+                )
+            else:
+                msg = (
+                    f"🧮 <b>نتيجة إدارة المخاطر لـ {sym}:</b>\n\n"
+                    f"💰 رأس المال: ${cap}\n"
+                    f"🛑 المخاطرة ({risk_pct}%): ${risk_amount:.2f}\n"
+                    f"➡️ حجم العقد: {position_size:.4f}\n"
+                    f"💵 قيمة الصفقة: ${position_value:.2f}\n\n"
+                    f"⚙️ <b>الرافعة المقترحة:</b> {leverage:.1f}x\n"
+                    f"<i>(استخدم دائماً العزل Isolated)</i>"
+                )
             await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
         except Exception:
-            await update.message.reply_text("⚠️ صيغة خاطئة (مثال: 1000 2)")
+            await update.message.reply_text("⚠️ Invalid format (1000 2)" if lang=="en" else "⚠️ صيغة خاطئة (مثال: 1000 2)")
         return
 
     if 'awaiting_port' in ctx.user_data:
@@ -4074,17 +4217,20 @@ async def on_text(update, ctx):
                 if uid not in store.data["portfolios"]: store.data["portfolios"][uid] = []
                 store.data["portfolios"][uid].append({"sym": sym, "entry": entry, "amount": amount})
                 store.save("portfolios")
-            await update.message.reply_text(f"✅ تمت إضافة {sym} إلى محفظتك (${amount}).\n/portfolio")
+            await update.message.reply_text(
+                f"✅ {sym} added to your portfolio (${amount}).\n/portfolio" if lang=="en"
+                else f"✅ تمت إضافة {sym} إلى محفظتك (${amount}).\n/portfolio"
+            )
         except Exception:
-            await update.message.reply_text("⚠️ أرسل رقماً صحيحاً (مثال: 100)")
+            await update.message.reply_text("⚠️ Send a valid number (100)" if lang=="en" else "⚠️ أرسل رقماً صحيحاً (مثال: 100)")
         return
 
-    # NORMAL SYMBOL
     touch_user(update.effective_user)
     sym = clean_symbol(text.split()[0])
-    if not sym: await update.message.reply_text("📝 إدخال رمز عملة صحيح"); return
+    if not sym:
+        await update.message.reply_text(t("invalid_symbol", lang)); return
 
-    wait = await update.message.reply_text(f"⏳ جارٍ تحليل {sym}...")
+    wait = await update.message.reply_text(t("analyzing", lang, sym=sym))
     try:
         res = await asyncio.to_thread(get_analysis, sym)
         st, _ = user_status(update.effective_user.id, store.data["users"].get(uid, {}))
@@ -4092,33 +4238,31 @@ async def on_text(update, ctx):
 
         kb = keyboard(sym, res["tf"], tier, "binance_fut")
         img = await asyncio.to_thread(render_chart, res, tier)
-        cap = caption_vip(res) if tier in ("admin","vip") else caption_free(res)
+        cap = caption_core(res, "vip" if tier in ("admin","vip") else "free", lang)
 
         await update.message.reply_photo(photo=img, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-        # ✨ ADMIN: نسخة نصية منفصلة قابلة للنسخ
         if tier == "admin":
             await send_admin_copy(update.message, res)
 
-        # 🎯 نقاطك (وميض + شريط تقدم + روابط)
         cur_pts = store.data["users"].get(uid, {}).get("points", 0)
         bot_un = ctx.application.bot_data.get("username", "")
         await send_points_flash(update.message, cur_pts, update.effective_user.id, bot_un)
 
     except PairNotFound:
-        await update.message.reply_text(f"❌ لم يتم العثور على العملة: {sym}")
+        await update.message.reply_text(t("not_found", lang, sym=sym))
     except NoData:
-        await update.message.reply_text("⚠️ البيانات غير متوفرة")
+        await update.message.reply_text(t("no_data", lang))
     except Exception:
         log.exception("handle")
-        await update.message.reply_text("⚠️ حدث خطأ")
+        await update.message.reply_text(t("error", lang))
     finally:
         try: await wait.delete()
         except Exception: pass
 
-PUBLIC_COMMANDS = [("start","ابدأ"),("help","المساعدة"),("myid","رقمي"),
-                   ("vip","VIP"),("menu","قائمتي 📋"),("portfolio","محفظتي 📊"),
-                   ("points","نقاطي 🎯"),("myref","رابط الإحالة 🔗")]
+PUBLIC_COMMANDS = [("start","ابدأ / Start"),("help","المساعدة / Help"),("myid","رقمي / My ID"),
+                   ("vip","VIP"),("menu","قائمتي / Menu 📋"),("portfolio","محفظتي / Portfolio 📊"),
+                   ("points","نقاطي / Points 🎯"),("myref","رابط الإحالة / Referral 🔗")]
 
 def get_crypto_news(symbol):
     try:
@@ -4151,7 +4295,7 @@ async def post_init(app):
         asyncio.create_task(golden_loop(app)), asyncio.create_task(promo_loop(app)),
         asyncio.create_task(whale_hunter_loop(app)),
     ]
-    log.info("ryma v103 | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | links=inline",
+    log.info("ryma v104 (bilingual) | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto",
              MAX_OPEN, CYCLE_GOLDEN, get_golden_config().get("min_score",1), is_multi_exchange(),
              VIP_THRESHOLD, VIP_REWARD_DAYS)
 
@@ -4189,279 +4333,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, on_text))
     app.add_error_handler(on_error)
     app.run_polling(drop_pending_updates=True)
-  # ═══════════════════════════════════════════════════════════════
-#    🛠️ PATCH: إصلاح التناقضات + ترجمة تلقائية للخاص + إشارات سريعة
-# ═══════════════════════════════════════════════════════════════
-
-# --- 1. قاموس الترجمة (i18n) للردود الخاصة فقط ---
-TEXTS = {
-    "ar": {
-        "decision_buy": "🟢 شراء",
-        "decision_sell": "🔴 بيع",
-        "decision_watch": "🟡 مراقبة",
-        "daily_title_long": "🟢 LONG",
-        "daily_title_short": "🔴 SHORT",
-        "flash_signal": "⚡ <b>إشارة سريعة (Flash Signal)</b>",
-        "frame": "⏱ الفريم",
-        "price": "💵 السعر",
-        "move": "📊 التحرك",
-        "volume": "🔥 الحجم",
-        "type": "🎯 نوع الحركة",
-        "decision": "🎯 <b>القرار المتوقع</b>",
-        "warning_flash": "⚠️ <i>إشارة سريعة — راجع الشارت قبل الدخول</i>",
-        "no_short": "🔻 <b>لا توجد فرص شورت حالياً (السوق يميل للصعود)</b>",
-        "watch_list": "👇 إليك أنشط العملات للمراقبة:",
-        "results": "📊 النتيجة",
-        "ready_post": "💡 الصفقات جاهزة للنشر يدوياً",
-        "timeout": "⏱️ استغرق السوق وقتاً طويلاً، حاول مرة أخرى بعد دقيقة.",
-        "no_setups": "🎯 لا توجد صفقات مطابقة حالياً بمعايير العقل المركزي.",
-        "short_radar": "🔻 رادار الشورت:",
-        "scan_title": "🎯 أفضل الإعدادات:",
-        "no_shorts": "لا شورت",
-        "vip_only": "🔒 VIP فقط",
-    },
-    "en": {
-        "decision_buy": "🟢 BUY",
-        "decision_sell": "🔴 SELL",
-        "decision_watch": "🟡 WATCH",
-        "daily_title_long": "🟢 LONG",
-        "daily_title_short": "🔴 SHORT",
-        "flash_signal": "⚡ <b>Flash Signal Detected</b>",
-        "frame": "⏱ Timeframe",
-        "price": "💵 Price",
-        "move": "📊 Move",
-        "volume": "🔥 Volume",
-        "type": "🎯 Move Type",
-        "decision": "🎯 <b>Expected Decision</b>",
-        "warning_flash": "⚠️ <i>Quick signal — check chart before entering</i>",
-        "no_short": "🔻 <b>No short opportunities currently (Market is bullish)</b>",
-        "watch_list": "👇 Most active coins to watch:",
-        "results": "📊 Result",
-        "ready_post": "💡 Trades are ready for manual posting",
-        "timeout": "⏱️ Market took too long, try again in a minute.",
-        "no_setups": "🎯 No setups match central brain criteria currently.",
-        "short_radar": "🔻 Short Radar:",
-        "scan_title": "🎯 Best Setups:",
-        "no_shorts": "No shorts",
-        "vip_only": "🔒 VIP only",
-    }
-}
-
-def get_auto_lang(user):
-    """يتعرف على لغة المستخدم تلقائياً من تيليجرام"""
-    if not user: return "ar"
-    code = (getattr(user, "language_code", "") or "").lower()
-    if code.startswith("ar"): return "ar"
-    if code: return "en"
-    return "ar"
-
-def T(user, key):
-    """دالة الترجمة السريعة"""
-    lang = get_auto_lang(user) if user else "ar"
-    return TEXTS.get(lang, TEXTS["ar"]).get(key, key)
-
-# --- 2. إصلاح الأوامر المتناقضة (للخاص) ---
-
-@admin_only
-async def cmd_scan_fixed(update, ctx):
-    wait = await update.message.reply_text("⏳...")
-    syms = await asyncio.to_thread(top_symbols, 60, True)
-    res = await asyncio.to_thread(scan_sync, syms[:30])
-    res = [r for r in res if r["rank"] >= 0]
-    res.sort(key=lambda r: -r["rank"])
-    if not res:
-        await wait.edit_text("لا شيء")
-        return
-    lines = [T(update.effective_user, "scan_title"), ""]
-    for r in res[:10]:
-        dec = T(update.effective_user, "decision_buy") if r["side"] == 1 else T(update.effective_user, "decision_sell")
-        icon = "🟢" if r["side"] == 1 else "🔴"
-        lines += [f"{r['grade']} | #{r['sym']} {icon}", f"   🎯 {dec}"]
-    await wait.edit_text("\n".join(lines), link_preview_options=NO_PREVIEW)
-
-@admin_only
-async def cmd_short_fixed(update, ctx):
-    wait = await update.message.reply_text("⏳...")
-    res = await asyncio.to_thread(scan_sync, COINS)
-    res = [r for r in res if r["side"] == -1 and r["rank"] >= 0]
-    if not res:
-        await wait.edit_text(T(update.effective_user, "no_shorts"))
-        return
-    lines = [T(update.effective_user, "short_radar")]
-    for r in res[:15]:
-        lines.append(f"{r['grade']} | #{r['sym']} | {T(update.effective_user, 'decision_sell')}")
-    await wait.edit_text("\n".join(lines), link_preview_options=NO_PREVIEW)
-
-@vip_only
-async def cmd_shorts_radar_fixed(update, ctx):
-    wait = await update.message.reply_text(T(update.effective_user, "short_radar"))
-    syms = await asyncio.to_thread(top_symbols, 40)
-    rows = []
-    for s in syms[:30]:
-        r = await asyncio.to_thread(short_radar, s)
-        if r:
-            rows.append((s, r))
-    if not rows:
-        fallback = await asyncio.to_thread(top_symbols, 5)
-        lines = [T(update.effective_user, "no_short"), T(update.effective_user, "watch_list"), ""]
-        for s in fallback:
-            lines.append(f"• #{s} — 🎯 {T(update.effective_user, 'decision_watch')}")
-        await wait.edit_text("\n".join(lines), parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
-        return
-    
-    lines = [T(update.effective_user, "short_radar"), ""]
-    for s, r in rows[:10]:
-        lines += [
-            f"🔻 #{s}: RSI {r['rsi']} | {fmt(r['price'])}",
-            f"   🎯 {T(update.effective_user, 'decision')}: {T(update.effective_user, 'decision_sell')}"
-        ]
-    await wait.edit_text("\n".join(lines), link_preview_options=NO_PREVIEW)
-
-# --- 3. إصلاح أمر صفقة اليوم /daily (للخاص) ---
-async def cmd_daily_fixed(update, ctx):
-    u = update.effective_user
-    if not u: return
-    rec = store.data["users"].get(str(u.id), {})
-    st, _ = user_status(u.id, rec)
-    if st not in ("admin", "vip", "trial", "warning"):
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 VIP", url=VIP_INVITE_LINK)]])
-        await update.message.reply_text(T(u, "vip_only"), reply_markup=kb)
-        return
-    
-    touch_user(u, "/daily")
-    wait = await update.message.reply_text("🎯...")
-    try:
-        try:
-            longs, shorts = await asyncio.wait_for(asyncio.to_thread(_build_daily_lists), timeout=90.0)
-        except asyncio.TimeoutError:
-            await wait.edit_text(T(u, "timeout"))
-            return
-
-        if not longs and not shorts:
-            await wait.edit_text(T(u, "no_setups"))
-            return
-
-        await wait.delete()
-        for idx, item in enumerate(longs, 1):
-            title = f"{T(u, 'daily_title_long')} {idx}"
-            txt = _format_daily_card(item["res"], title, item.get("change", 0), item.get("volume", 0))
-            await update.message.reply_text(txt, parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
-            await asyncio.sleep(0.7)
-            
-        for idx, item in enumerate(shorts, 1):
-            title = f"{T(u, 'daily_title_short')} {idx}"
-            txt = _format_daily_card(item["res"], title, item.get("change", 0), item.get("volume", 0))
-            await update.message.reply_text(txt, parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
-            await asyncio.sleep(0.7)
-            
-        await update.message.reply_text(
-            f"{T(u, 'results')}: {len(longs)} LONG + {len(shorts)} SHORT\n\n{T(u, 'ready_post')}\n\n{RISK_WARNING}",
-            parse_mode=ParseMode.HTML,
-        )
-    except Exception as e:
-        log.exception("daily_fixed")
-        try: await wait.edit_text(f"⚠️ Error: {str(e)[:150]}")
-        except Exception: pass
-
-# --- 4. إعادة بناء أزرار القوائم (بدون زر اللغة نهائياً) ---
-def keyboard_vip_menu_fixed(uid=None):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💎✨ الفرصة الذهبية / Golden", callback_data="vip_cmd:/golden")],
-        [InlineKeyboardButton("🎯 صفقة اليوم / Daily", callback_data="vip_cmd:/daily")],
-        [InlineKeyboardButton("🚀 رادار النخبة (Alpha)", callback_data="vip_cmd:/alpha_v2")],
-        [InlineKeyboardButton("🔮 التنبؤ / Predict", callback_data="vip_cmd:/predict")],
-        [InlineKeyboardButton("🐋 الحيتان / Whales", callback_data="vip_cmd:/whales")],
-        [InlineKeyboardButton("💥 الانفجارات / Explosions", callback_data="vip_cmd:/explosions")],
-        [InlineKeyboardButton("🚀 الصعود / Pump", callback_data="vip_cmd:/pump")],
-        [InlineKeyboardButton("📉 القيعان / Bottoms", callback_data="vip_cmd:/bottom")],
-        [InlineKeyboardButton("🔻 فرص الشورت / Shorts", callback_data="vip_cmd:/shortsradar")],
-        [InlineKeyboardButton("⭐ رادار Alpha", callback_data="vip_cmd:/alpha")],
-        [InlineKeyboardButton("💧 السيولة / Liquidity", callback_data="vip_cmd_args:liquidity")],
-        [InlineKeyboardButton("📊 الفيوتشر / Futures", callback_data="vip_cmd_args:futures")],
-        [InlineKeyboardButton("📈 الصفقات النشطة / Active", callback_data="vip_cmd:/active")],
-        [InlineKeyboardButton("🔗 رابط الإحالة / Ref", callback_data="my_ref"),
-         InlineKeyboardButton("🎯 نقاطي / Points", callback_data="my_points")],
-        [InlineKeyboardButton("🌐 المنصات / Exchanges", callback_data="refs:binance_fut")],
-        [InlineKeyboardButton("🆓 القناة المجانية / Free Channel", url=CHANNEL_LINK)],
-        [InlineKeyboardButton("❌ إغلاق / Close", callback_data="close_menu")],
-    ])
-
-# --- 5. ميزة التوصيات السريعة (Flash Signals) - تُرسل للقناة بالعربي فقط ---
-async def flash_signals_loop(app):
-    await asyncio.sleep(60)
-    seen_flash = set()
-    while True:
-        try:
-            syms = await asyncio.to_thread(top_symbols, 30)
-            for sym in syms[:15]:
-                try:
-                    df = await asyncio.to_thread(get_candles, sym, "15m", 200, 30, 50)
-                    if df.empty or len(df) < 50: continue
-                    df = add_indicators(df, 100)
-                    last = df.iloc[-1]
-                    prev = df.iloc[-2]
-                    
-                    if pd.isna(last.rvol) or last.rvol < 2.5: continue
-                    price_move = (last.close - prev.close) / prev.close * 100
-                    if abs(price_move) < 1.5: continue
-                    
-                    breakout_up = last.close > last.highest_10 if not pd.isna(last.highest_10) else False
-                    breakout_down = last.close < last.lowest_10 if not pd.isna(last.lowest_10) else False
-                    if not (breakout_up or breakout_down): continue
-                    
-                    key = f"{sym}:{int(last.t)}"
-                    if key in seen_flash: continue
-                    seen_flash.add(key)
-                    if len(seen_flash) > 1000: seen_flash.clear()
-                    
-                    link = coin_link(sym, "binance_fut")
-                    side_icon_ar = "🟢 اختراق صاعد" if price_move > 0 else "🔴 كسر هابط"
-                    dec_ar = "🟢 شراء" if price_move > 0 else "🔴 بيع"
-                    
-                    # النص بالعربية فقط (للقناة)
-                    msg = (
-                        f"⚡ <b>إشارة سريعة (Flash Signal)</b>\n"
-                        f"━━━━━━━━━━━━━━━━\n"
-                        f"📌 <a href='{link}'>#{sym}/USDT</a> 👆\n\n"
-                        f"⏱ الفريم: 15m\n"
-                        f"💵 السعر: <code>{fmt(last.close)}</code>\n"
-                        f"📊 التحرك: <b>{price_move:+.2f}%</b>\n"
-                        f"🔥 الحجم: <b>x{last.rvol:.2f}</b>\n\n"
-                        f"🎯 نوع الحركة: {side_icon_ar}\n\n"
-                        f"🎯 <b>القرار المتوقع: {dec_ar}</b>\n\n"
-                        f"⚠️ <i>إشارة سريعة — راجع الشارت قبل الدخول</i>\n"
-                        f"👤 {BRAND}"
-                    )
-                    
-                    if ADMIN_ID:
-                        try: await app.bot.send_message(ADMIN_ID, msg, parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
-                        except Exception: pass
-                    if VIP_CHANNEL_ID:
-                        try: await app.bot.send_message(VIP_CHANNEL_ID, msg, parse_mode=ParseMode.HTML, protect_content=PROTECT, link_preview_options=NO_PREVIEW)
-                        except Exception: pass
-                except Exception: continue
-        except asyncio.CancelledError: raise
-        except Exception: log.exception("flash_signals")
-        await asyncio.sleep(180)
-
-# ═══════════════════════════════════════════════════════════════
-#              🔁 استبدال الدوال القديمة بالجديدة (Monkey Patching)
-# ═══════════════════════════════════════════════════════════════
-
-cmd_scan = cmd_scan_fixed
-cmd_short = cmd_short_fixed
-cmd_shorts_radar = cmd_shorts_radar_fixed
-cmd_daily = cmd_daily_fixed
-keyboard_vip_menu = keyboard_vip_menu_fixed
-
-# إضافة ميزة التوصيات السريعة عند بدء التشغيل
-_original_post_init = post_init
-async def post_init(app):
-    await _original_post_init(app)
-    app.bot_data["tasks"].append(asyncio.create_task(flash_signals_loop(app)))
-    log.info("⚡ Flash Signals loop started (Arabic Only in Channel)")
-
-# ═══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     main()
