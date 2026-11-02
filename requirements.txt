@@ -1,7 +1,8 @@
- python-telegram-bot>=21.2
-pandas
-numpy
-matplotlib
-requests
-ccxt
-Pillow
+python-telegram-bot>=21.0
+ccxt>=4.0.0
+pandas>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+requests>=2.31.0
+arabic-reshaper>=3.0.0
+python-bidi>=0.4.2 
