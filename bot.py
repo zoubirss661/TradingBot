@@ -6,7 +6,18 @@ import urllib.parse
 import concurrent.futures
 
 matplotlib.use("Agg")
+matplotlib.rcParams["font.family"] = ["DejaVu Sans", "Noto Naskh Arabic", "Amiri", "sans-serif"]
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+    def _ar_shape(s): return get_display(arabic_reshaper.reshape(s))
+except Exception:
+    def _ar_shape(s): return s
+
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
                       BotCommand, LinkPreviewOptions, CopyTextButton)
 from telegram.constants import ParseMode
@@ -28,6 +39,10 @@ VIP_CHANNEL_ID = _chat(_e("VIP_CHANNEL_ID"))
 ADMIN_ID = _int("ADMIN_ID", 7002618091)
 GIST_ID = _e("GIST_ID")
 GITHUB_TOKEN = _e("GITHUB_TOKEN")
+WHALE_ALERT_KEY = _e("WHALE_ALERT_KEY")
+ETHERSCAN_KEY = _e("ETHERSCAN_API_KEY")
+ETH_WATCH = [a.strip().lower() for a in _e("ETH_EXCHANGE_ADDRESSES").split(",") if a.strip()]
+ETH_MIN_TX = 100
 CONTACT_LINK = _e("CONTACT_LINK", "@rym_rima1")
 CHANNEL_LINK = _e("CHANNEL_LINK", "https://t.me/rym_rima16")
 VIP_INVITE_LINK = _e("VIP_INVITE_LINK", "https://t.me/+gTMJiBiiC_IyZjZk")
@@ -37,6 +52,9 @@ MAINTENANCE = _e("MAINTENANCE", "0") == "1"
 BRAND = "💎 Ryma Crypto 💎"
 RISK_WARNING = "⚠️ <i>التداول ينطوي على مخاطر عالية. يرجى إدارة رأس المال بذكاء. ليست نصيحة مالية.</i>"
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+
+def _btn(text, **kw):
+    return InlineKeyboardButton(text, **kw)
 
 EXCLUDE_TICKERS = {"MU", "SPCX", "SNXX", "SOXS", "CL", "TSLA", "AAPL", "NVDA", "META", "GOOG", "AMZN", "MSFT", "NFLX", "AMD", "INTC", "BABA", "COIN", "MSTR", "GME", "AMC"}
 
@@ -103,7 +121,7 @@ ALPHA_COINS = ["ETH","BNB","SOL","SUI","NEAR","INJ","TIA","FLOKI","APT","ARB"]
 COINS = CORE_COINS + MEME_COINS
 WEAK_COINS = set()
 DAILY_EXCLUDE = {"BTC","ETH","BNB","SOL","XRP","DOGE","ADA","TRX","LTC","DOT","LINK","AVAX","TON","SHIB","PEPE","USDC","FDUSD","TUSD","USDT","DAI","BUSD","USDP","USDD","USDE","PYUSD","EUR","AEUR"} | EXCLUDE_TICKERS
-STABLES = DAILY_EXCLUDE
+STABLES = {"USDC","FDUSD","TUSD","USDT","DAI","BUSD","USDP","USDD","USDE","PYUSD","EUR","AEUR"}
 
 POINTS_DAILY = 1
 POINTS_PROMO = 5
@@ -115,7 +133,7 @@ ALPHA_MAJORS_EXCLUDE = {"BTC","ETH","BNB","SOL","XRP","ADA","DOGE",
                         "AVAX","LINK","DOT","LTC","TRX","TON","SHIB","PEPE",
                         "USDC","FDUSD","TUSD","USDT","DAI","BUSD","USDP","USDD","USDE","PYUSD"}
 
-TRIAL_DAYS = 7
+TRIAL_DAYS = 1
 VIP_FORCE_DAY = 13
 FEE, SLIP = 0.0008, 0.0005
 TF_MS = {"15m": 900_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
@@ -394,9 +412,7 @@ def user_status(uid, rec):
     if ADMIN_ID and uid == ADMIN_ID: return "admin", 0
     if is_vip(uid): return "vip", 0
     actual_days = (now_s() - int(rec.get("first_seen", now_s()))) // DAY + 1
-    calculated_day = actual_days - 3
-    if calculated_day <= TRIAL_DAYS: return "trial", actual_days
-    if calculated_day < VIP_FORCE_DAY: return "warning", actual_days
+    if actual_days <= TRIAL_DAYS: return "trial", actual_days
     return "blocked", actual_days
 
 def add_vip(uid, days):
@@ -513,7 +529,7 @@ def binance_futures_all_tickers():
                 sym_full = t.get("symbol", "")
                 if not sym_full.endswith("USDT"): continue
                 base_sym = sym_full[:-4]
-                if base_sym in DAILY_EXCLUDE or base_sym in EXCLUDE_TICKERS: continue
+                if base_sym in STABLES or base_sym in EXCLUDE_TICKERS: continue
                 if re.search(r"(UP|DOWN|BULL|BEAR|3L|3S|USDC)$", base_sym): continue
                 ch = float(t.get("priceChangePercent", 0)); price = float(t.get("lastPrice", 0))
                 qv = float(t.get("quoteVolume", 0))
@@ -582,6 +598,7 @@ def _fetch_exchange(name, sym, tf, bars):
 _candle_cache = {}
 def get_candles(sym, tf, bars=450, ttl=CANDLE_TTL, min_bars=MIN_BARS, binance_only=False):
     key = (sym, tf, bars, min_bars, binance_only)
+    if len(_candle_cache) > 400: _candle_cache.clear()
     hit = _candle_cache.get(key)
     if hit and time.time()-hit[0] < ttl: return hit[1]
     try:
@@ -626,6 +643,7 @@ def get_candles(sym, tf, bars=450, ttl=CANDLE_TTL, min_bars=MIN_BARS, binance_on
 
 _price_cache = {}
 def live_price(sym):
+    if len(_price_cache) > 400: _price_cache.clear()
     hit = _price_cache.get(sym)
     if hit and time.time()-hit[0] < PRICE_TTL: return hit[1], hit[2]
     try:
@@ -707,7 +725,8 @@ def _movers_from_binance_mirror(min_change=DAILY_MIN_CHANGE, min_vol=DAILY_MIN_V
         rows = binance_futures_all_tickers()
         if not rows: return []
         return [dict(symbol=x["symbol"], change=x["change"], price=x["price"], volume=x["volume"], src="binance_fut")
-                for x in rows if abs(x["change"]) >= min_change and x["volume"] >= min_vol]
+                for x in rows if abs(x["change"]) >= min_change and x["volume"] >= min_vol
+                and x["symbol"] not in DAILY_EXCLUDE]
     except Exception: return []
 
 def get_top_movers(force=False):
@@ -769,6 +788,34 @@ def futures_long_short_ratio(sym, period="4h", limit=10):
     except Exception: pass
     return None
 
+def futures_taker_flow(sym, limit=500):
+    try:
+        r = requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/aggTrades",
+                         params={"symbol": f"{sym}USDT", "limit": limit}, timeout=8)
+        if r.status_code != 200: return None
+        buy = sell = 0.0
+        for t in r.json():
+            q = float(t.get("q", 0))
+            if t.get("m"): sell += q
+            else: buy += q
+        total = buy + sell
+        if total <= 0: return None
+        return round(buy / total, 3)
+    except Exception: return None
+
+def futures_liquidations(sym, limit=100):
+    try:
+        r = requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/allForceOrders",
+                         params={"symbol": f"{sym}USDT", "limit": limit}, timeout=8)
+        if r.status_code != 200: return None
+        longs = shorts = 0.0
+        for o in r.json():
+            notional = float(o.get("price", 0)) * float(o.get("origQty", 0))
+            if o.get("side") == "SELL": longs += notional
+            else: shorts += notional
+        return dict(long_liq=longs, short_liq=shorts)
+    except Exception: return None
+
 def futures_signal(sym):
     try:
         oi = futures_oi_history(sym, "4h", 20); fr = futures_funding_rate(sym); ls = futures_long_short_ratio(sym)
@@ -800,6 +847,7 @@ def futures_signal(sym):
 _futures_score_cache = {}
 def futures_score_for(sym, side):
     key = (sym, side)
+    if len(_futures_score_cache) > 400: _futures_score_cache.clear()
     hit = _futures_score_cache.get(key)
     if hit and time.time() - hit[0] < 300: return hit[1]
     try:
@@ -828,7 +876,13 @@ def futures_score_for(sym, side):
                 if ls > 2.0: score += 2
                 elif ls > 1.5: score += 1
                 elif ls < 0.67: score -= 2
-        result = dict(score=score, details=details, oi=oi, fr=fr, ls=ls)
+        tf_ratio = futures_taker_flow(sym)
+        if tf_ratio is not None:
+            if side == 1 and tf_ratio > 0.6: score += 1; details.append(f"Taker شراء {tf_ratio:.0%}")
+            elif side == -1 and tf_ratio < 0.4: score += 1; details.append(f"Taker بيع {1 - tf_ratio:.0%}")
+            elif side == 1 and tf_ratio < 0.4: score -= 1
+            elif side == -1 and tf_ratio > 0.6: score -= 1
+        result = dict(score=score, details=details, oi=oi, fr=fr, ls=ls, taker=tf_ratio)
         _futures_score_cache[key] = (time.time(), result)
         return result
     except Exception: return dict(score=0, details=[], oi=None, fr=None, ls=None)
@@ -1137,7 +1191,8 @@ def find_pivots(df, window=PIVOT_WINDOW, lookback=PIVOT_LOOKBACK):
 
 def select_targets(pivots, price, side, min_dist_pct=MIN_PIVOT_DIST):
     selected = []
-    for p in pivots:
+    ordered = sorted(set(pivots)) if side == 1 else sorted(set(pivots), reverse=True)
+    for p in ordered:
         if side == 1:
             if p <= price * (1 + min_dist_pct/100): continue
             if selected and p <= selected[-1] * (1 + min_dist_pct/100): continue
@@ -1157,7 +1212,7 @@ def compute_core_levels(df, i, side, price=None):
         highs, lows = find_pivots(df, PIVOT_WINDOW)
         targets = select_targets(highs if side==1 else lows, entry, side)
         if len(targets) < 2:
-            targets = ([entry*(1+x/100) for x in [2.5,5.0,7.0,8.0]] if side==1 else [entry*(1-x/100) for x in [2.5,5.0,7.0,8.0]])
+            targets = [entry + side * atr * m for m in [1.5, 3.0, 4.5, 6.0]]
         targets = targets[:4]
         lookback_df = df.tail(20)
         swing = float(lookback_df["low"].min()) if side==1 else float(lookback_df["high"].max())
@@ -1247,7 +1302,7 @@ def detect_double_top_bottom(df):
     if len(highs) >= 2:
         h1_i, h1_p = highs[-2]; h2_i, h2_p = highs[-1]
         if h2_i - h1_i >= 5 and _approx_equal(h1_p, h2_p, 1.5):
-            neck = min(float(df["low"].iloc[h1_i:h2_i+1]))
+            neck = float(df["low"].iloc[h1_i:h2_i+1].min())
             cur = float(df["close"].iloc[-1])
             if cur < neck:
                 patterns.append(dict(name="Double Top", bias="bearish", confirmed=True,
@@ -1255,7 +1310,7 @@ def detect_double_top_bottom(df):
     if len(lows) >= 2:
         l1_i, l1_p = lows[-2]; l2_i, l2_p = lows[-1]
         if l2_i - l1_i >= 5 and _approx_equal(l1_p, l2_p, 1.5):
-            neck = max(float(df["high"].iloc[l1_i:l2_i+1]))
+            neck = float(df["high"].iloc[l1_i:l2_i+1].max())
             cur = float(df["close"].iloc[-1])
             if cur > neck:
                 patterns.append(dict(name="Double Bottom", bias="bullish", confirmed=True,
@@ -1269,7 +1324,7 @@ def detect_head_shoulders(df):
         l_sh, head, r_sh = highs[-3], highs[-2], highs[-1]
         if head[1] > l_sh[1] and head[1] > r_sh[1]:
             if _approx_equal(l_sh[1], r_sh[1], 3.0) and (r_sh[0] - l_sh[0]) >= 15:
-                neck = min(float(df["low"].iloc[l_sh[0]:r_sh[0]+1]))
+                neck = float(df["low"].iloc[l_sh[0]:r_sh[0]+1].min())
                 cur = float(df["close"].iloc[-1])
                 if cur < neck:
                     patterns.append(dict(name="Head & Shoulders", bias="bearish",
@@ -1278,7 +1333,7 @@ def detect_head_shoulders(df):
         l_sh, head, r_sh = lows[-3], lows[-2], lows[-1]
         if head[1] < l_sh[1] and head[1] < r_sh[1]:
             if _approx_equal(l_sh[1], r_sh[1], 3.0) and (r_sh[0] - l_sh[0]) >= 15:
-                neck = max(float(df["high"].iloc[l_sh[0]:r_sh[0]+1]))
+                neck = float(df["high"].iloc[l_sh[0]:r_sh[0]+1].max())
                 cur = float(df["close"].iloc[-1])
                 if cur > neck:
                     patterns.append(dict(name="Inverse H&S", bias="bullish",
@@ -1520,6 +1575,7 @@ def analyze(sym):
                 patterns=patterns)
 
 def get_analysis(sym, force=False):
+    if len(_analysis_cache) > 300: _analysis_cache.clear()
     hit = _analysis_cache.get(sym)
     if hit and not force and time.time()-hit[0] < 60: return hit[1]
     res = analyze(sym); _analysis_cache[sym] = (time.time(), res); return res
@@ -1622,7 +1678,7 @@ def check_signals_sync():
                     for row in rows.itertuples():
                         ev = trade_step(p, row.open, row.high, row.low, row.close, row.atr)
                         p["next_t"] = int(row.t) + TF_MS[tf]
-                        notes += [(coin, tf, p["side"], e, p.get("R")) for e in ev if e["kind"] != "DONE"]
+                        notes += [(coin, tf, p["side"], e, p.get("R"), p["id"]) for e in ev if e["kind"] != "DONE"]
                         if p["state"] in ("closed","expired"): break
                     store.save("signals")
                 if p["state"] == "closed": _archive(p)
@@ -1659,7 +1715,7 @@ def format_trade_card(p, event_kind=None, event_data=None):
     else: label = "🛑 Stop loss"
     lines.append(f"{label}: {fmt(p['sl'])}")
     tp_hits = sum(1 for t in p["tps"] if t["hit"])
-    lines += ["", f"📊 R: {p.get('realized', 0.0):+.2f} | TP: {tp_hits}/4", "",
+    lines += ["", f"📊 R: {p.get('realized', 0.0):+.2f} | TP: {tp_hits}/{len(p['tps'])}", "",
               f"⚠️ <i>تحقق من الأسعار على {source}</i>"]
     if p.get("state") == "closed":
         labels = {"TP":"✅ صفقة ناجحة بالكامل","SL":"🛑 ضرب وقف الخسارة","BE":"🔒 خروج على التعادل",
@@ -1744,25 +1800,43 @@ def golden_score(sym, debug=False, relaxed=False):
         for p in pats:
             if p["bias"] == "bearish" and side == 1: return None
             if p["bias"] == "bullish" and side == -1: return None
-        if side == 1:
-            sl = price * 0.95
-            tps = [price * 1.05, price * 1.10, price * 1.15, price * 1.25]
-        else:
-            sl = price * 1.05
-            tps = [price * 0.95, price * 0.90, price * 0.85, price * 0.75]
-        reasons = [f"العقل المركزي: {res['grade']}",
-                   f"اتجاه: {'صاعد' if res['trend'] in ('up','strong_up') else 'هابط'}"]
+        cfg = get_golden_config()
+        df = res["df"]; last = df.iloc[-1]
+        rsi_v = float(res["rsi"])
+        rvol = float(last["rvol"]) if not pd.isna(last["rvol"]) else 0.0
+        hi10 = float(df["highest_10"].iloc[-2]); lo10 = float(df["lowest_10"].iloc[-2])
+        mtf_c, mtf_t = mtf_score(sym, side)
+        checks = {
+            "require_1d_trend": res["trend_d"] == ("up" if side == 1 else "down"),
+            "require_mtf": mtf_t > 0 and mtf_c == mtf_t,
+            "require_rsi": (40 <= rsi_v <= 70) if side == 1 else (30 <= rsi_v <= 60),
+            "require_volume": rvol >= 1.2,
+            "require_breakout": (float(last["close"]) > hi10) if side == 1 else (float(last["close"]) < lo10),
+            "require_liquidity": check_liquidity(sym, 1_000_000),
+            "require_alpha": sym in ALPHA_COINS,
+        }
+        failed = [k for k, v in checks.items() if cfg.get(k) and not v]
+        if failed:
+            if debug: return dict(sym=sym, score=0, reasons=[f"شروط غير متحققة: {', '.join(failed)}"])
+            return None
+        score = (3 if res["grade"] == "A+" else 2) + sum(1 for v in checks.values() if v)
+        if score < cfg.get("min_score", 1):
+            if debug: return dict(sym=sym, score=score, reasons=["النقاط أقل من الحد الأدنى"])
+            return None
+        reasons = [f"الدرجة: {res['grade']}", f"اتجاه: {'صاعد' if side == 1 else 'هابط'}"]
+        reasons += [f"✅ {k.replace('require_', '')}" for k, v in checks.items() if v]
         for p in pats[:2]:
-            emoji = "🟢" if p["bias"]=="bullish" else ("🔴" if p["bias"]=="bearish" else "⚪")
-            tf_lbl = f"[{p.get('tf','').upper()}]" if p.get('tf') else ""
+            emoji = "🟢" if p["bias"] == "bullish" else ("🔴" if p["bias"] == "bearish" else "⚪")
+            tf_lbl = f"[{p.get('tf','').upper()}]" if p.get("tf") else ""
             reasons.append(f"{emoji} نموذج {p['name']} {tf_lbl}")
+        sl = res["lv"]["sl"]
+        tps = [t["px"] for t in res["lv"]["tps"]]
         return dict(
-            sym=sym, side=side, score=100 if res["grade"] == "A+" else 80,
-            reasons=reasons,
+            sym=sym, side=side, score=score, reasons=reasons,
             price=price, atr=atr, sl=sl, tps=tps,
             risk=abs(price - sl), trend_1d=res["trend_d"], trend_4h=res["trend"],
-            change_7d=0, rsi=res["rsi"], rvol=1.0, source=res.get("source", "binance_fut"),
-            patterns=pats
+            change_7d=0, rsi=rsi_v, rvol=rvol, source=res.get("source", "binance_fut"),
+            patterns=pats,
         )
     except Exception as e:
         log.error(f"golden_score err {sym}: {e}")
@@ -1774,7 +1848,7 @@ def _run_golden_scan(syms, max_results, progress_cb, relaxed=False):
         try: return golden_score(sym, debug=False, relaxed=relaxed)
         except Exception: return None
     processed = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
         futures = {executor.submit(scan_one, s): s for s in syms}
         for future in concurrent.futures.as_completed(futures):
             processed += 1
@@ -1791,7 +1865,7 @@ def golden_scan(max_results=2, progress_cb=None):
         rows = binance_futures_all_tickers()
         if rows:
             rows_sorted = sorted(rows, key=lambda x: -x["volume"])
-            syms = [x["symbol"] for x in rows_sorted if x["volume"] > 2_000_000 and x["symbol"] not in EXCLUDE_TICKERS][:600]
+            syms = [x["symbol"] for x in rows_sorted if x["volume"] > 2_000_000 and x["symbol"] not in EXCLUDE_TICKERS][:300]
         else:
             syms = top_symbols(600, binance_only=True)
     except Exception:
@@ -1839,12 +1913,12 @@ def build_whale_tweet(sym, side, notional, price):
     side_emoji = "🟢 شراء" if side == "buy" else "🔴 بيع"
     name, ref = referral_for("binance_fut")
     text = (
-        f"🚨 عاجل: رصد حوت في السوق! 🐋\n\n"
+        f"📢 صفقة كبيرة مرصودة على Binance\n\n"
         f"💰 صفقة {side_emoji} ضخمة على #{sym}/USDT\n"
         f"💵 بقيمة: ${notional:,.0f}\n"
         f"📊 السعر: {fmt(price)}\n\n"
-        f"⚡️ تحرك الحيتان يعني حركة قوية قادمة!\n"
-        f"🔗 للتداول اللحظي وسحب أرباحك من حركة الحوت:\n"
+        f"⚡️ الصفقات الكبيرة قد تؤثر على السعر\n"
+        f"🔗 للتداول على المنصة:\n"
         f"{ref}\n\n"
         f"👤 Ryma Crypto"
     )
@@ -1890,7 +1964,7 @@ def build_copy_post(res):
 async def send_admin_copy(msg_obj, res):
     try:
         await msg_obj.reply_text(
-            build_copy_post(res),
+            build_copy_post(res) + "\n\n" + admin_stats_line(res),
             parse_mode=None,
             link_preview_options=NO_PREVIEW,
         )
@@ -1898,6 +1972,10 @@ async def send_admin_copy(msg_obj, res):
         log.warning(f"send_admin_copy: {e}")
 
 def keyboard_share_post(res):
+    rows = []
+    general_text = build_copy_post(res)
+    share_url = f"https://t.me/share/url?url=&text={urllib.parse.quote(general_text)}"
+    rows.append([_btn("📋 مشاركة الصفقة (Telegram)", url=share_url)])
     trade_meta = [
         ("binance", "🟡", "Binance Square"),
         ("bybit",   "🔵", "Bybit"),
@@ -1910,19 +1988,14 @@ def keyboard_share_post(res):
         ("facebook", "📘", "Facebook"),
         ("whatsapp", "💬", "WhatsApp"),
         ("reddit",   "🔴", "Reddit"),
-        ("discord",  "🎮", "Discord")
+        ("discord",  "🎮", "Discord"),
     ]
-    trade_rows = []
-    general_text = build_copy_post(res)
-    trade_rows.append([InlineKeyboardButton("📋 نسخ الصفقة", copy_text=CopyTextButton(text=general_text[:250]))])
     for key, emoji, name in trade_meta:
         short_text = build_social_text(res, key)
-        trade_rows.append([InlineKeyboardButton(f"📋 نسخ لـ {emoji} {name}", copy_text=CopyTextButton(text=short_text[:250]))])
-    return InlineKeyboardMarkup(
-        trade_rows + [
-            [InlineKeyboardButton("❌ إغلاق", callback_data="close_menu")],
-        ]
-    )
+        u = f"https://t.me/share/url?url=&text={urllib.parse.quote(short_text)}"
+        rows.append([_btn(f"📤 {emoji} {name}", url=u)])
+    rows.append([_btn("❌ إغلاق", callback_data="close_menu")])
+    return InlineKeyboardMarkup(rows)
 
 async def notify_both(bot, text, protect=True):
     for chat in (VIP_CHANNEL_ID, ADMIN_ID or None):
@@ -1942,58 +2015,111 @@ async def notify_free(bot, text):
         except Exception as e:
             log.warning(f"notify_free: {str(e)[:80]}")
 
+TRENDLINE_PATTERNS = {"Ascending Triangle", "Descending Triangle", "Symmetrical Triangle", "Rising Wedge", "Falling Wedge"}
+
+def _new_fig(w=11, h=7.5, bg="#ffffff"):
+    fig = Figure(figsize=(w, h), facecolor=bg)
+    FigureCanvasAgg(fig)
+    return fig
+
+def _to_png(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=130, facecolor=fig.get_facecolor(), bbox_inches="tight")
+    buf.seek(0)
+    return buf
+
+def _draw_candles(ax, df, up, down):
+    x = np.arange(len(df))
+    o = df["open"].values.astype(float); h = df["high"].values.astype(float)
+    l = df["low"].values.astype(float); c = df["close"].values.astype(float)
+    colors = np.where(c >= o, up, down)
+    ax.vlines(x, l, h, colors=colors, linewidth=1.0)
+    body = np.maximum(np.abs(c - o), (h.max() - l.min()) * 0.0008)
+    ax.bar(x, body, bottom=np.minimum(o, c), color=colors, width=0.7, linewidth=0)
+    return x
+
+def _style_axes(axes, bg, fg, grid):
+    for a in axes:
+        a.set_facecolor(bg)
+        a.tick_params(colors=fg, labelsize=8)
+        a.grid(color=grid, lw=0.5, alpha=0.6)
+        for sp in a.spines.values(): sp.set_color(grid)
+        a.yaxis.tick_right()
+
+def _time_ticks(ax, df, n_ticks=6):
+    ts = pd.to_datetime(df["t"], unit="ms")
+    step = max(len(df) // n_ticks, 1)
+    idx = list(range(0, len(df), step))
+    ax.set_xticks(idx)
+    ax.set_xticklabels([ts.iloc[i].strftime("%m-%d %H:%M") for i in idx], fontsize=7)
+
 def render_chart(res, tier="free", published=False):
     df = res["df"].tail(CHART_BARS).reset_index(drop=True)
-    lv, side, tf = res["lv"], res["side"], res["tf"]
-    n_tps = 4 if tier in ("admin","vip") else 2
-    bg, fg = "#ffffff", "#111111"; navy = "#1e3a8a"; blue = "#1565c0"
-    fig = plt.figure(figsize=(11,7.5), facecolor=bg)
-    gs = fig.add_gridspec(2,1, height_ratios=[4.2,1], hspace=0.06)
-    ax = fig.add_subplot(gs[0], facecolor=bg); axr = fig.add_subplot(gs[1], facecolor=bg, sharex=ax)
-    x = np.arange(len(df))
-    ax.fill_between(x, df["bb_lo"], df["bb_up"], color=navy, alpha=0.25)
-    ax.plot(x, df["bb_up"], color=navy, lw=1.5, ls="--")
-    ax.plot(x, df["bb_mid"], color=navy, lw=1.1)
-    ax.plot(x, df["bb_lo"], color=navy, lw=1.5, ls="--")
-    if tier in ("admin","vip"):
-        ax.plot(x, df["ema20"], color="#f5c518", lw=1.3)
-        ax.plot(x, df["ema50"], color="#1976d2", lw=1.3)
-        ax.plot(x, df["ema200"], color="#7b1fa2", lw=1.3)
-        ax.plot(x, df["vwap"], color="#ff00ff", lw=1.5, ls=":")
-    ax.plot(x, df["close"], color=blue, lw=2.2)
-    levels = [(lv["entry"], "دخول", "#0d47a1", "-."), (lv["sl"], "وقف", "#d32f2f", "--")]
-    for j,tp in enumerate(lv["tps"][:n_tps], 1):
-        levels.append((tp["px"], f"هدف{j}", "#2e7d32", "--"))
-    xe = len(df)-1
-    for p_, name, col, ls in levels:
-        ax.axhline(p_, color=col, lw=1.1, ls=ls)
-        ax.text(xe+0.6, p_, f" {name} {fmt(p_)}", color=col, fontsize=8, va="center",
-                fontweight="bold", bbox=dict(boxstyle="round,pad=0.15", fc=bg, ec=col, lw=0.6))
-    lo = min([float(df["low"].min())]+[v[0] for v in levels])
-    hi = max([float(df["high"].max())]+[v[0] for v in levels])
-    pad = (hi-lo)*0.05
-    ax.set_ylim(lo-pad, hi+pad); ax.set_xlim(-1, len(df)+17)
+    sym, tf = res["sym"], res["tf"]
+    bg, fg, grid = "#ffffff", "#111111", "#dddddd"
+    fig = _new_fig(11, 7.5, bg)
+    gs = fig.add_gridspec(2, 1, height_ratios=[4.2, 1], hspace=0.06)
+    ax = fig.add_subplot(gs[0])
+    axr = fig.add_subplot(gs[1], sharex=ax)
+    x = _draw_candles(ax, df, "#26a69a", "#ef5350")
+    ax.plot(x, df["ema20"], color="#f5c518", lw=1.3, label="EMA20")
+    ax.plot(x, df["ema50"], color="#1976d2", lw=1.3, label="EMA50")
+    ax.plot(x, df["ema200"], color="#7b1fa2", lw=1.3, label="EMA200")
+    ax.legend(loc="upper left", fontsize=8, frameon=False)
+    ax.tick_params(labelbottom=False)
     axr.plot(x, df["rsi"], color="#7b1fa2", lw=1.3)
-    axr.axhline(70, color="#ef5350", lw=0.7, ls="--"); axr.axhline(30, color="#26a69a", lw=0.7, ls="--")
-    axr.fill_between(x, 30, 70, color="#f8bbd0", alpha=0.15); axr.set_ylim(10, 90)
-    for a_ in (ax, axr):
-        a_.tick_params(colors=fg, labelsize=8); a_.grid(color="#e8e8e8", lw=0.6)
-        for sp in a_.spines.values(): sp.set_color("#888888")
-        a_.yaxis.tick_right()
-    plt.setp(ax.get_xticklabels(), visible=False)
-    step = max(len(df)//6, 1); ts = pd.to_datetime(df["t"], unit="ms")
-    axr.set_xticks(range(0, len(df), step))
-    axr.set_xticklabels([ts.iloc[i].strftime("%Y-%m-%d") for i in range(0,len(df),step)], fontsize=8)
-    col = "#26a69a" if side==1 else "#ef5350"
-    ax.set_title(f"{res['sym']}/USDT  -  {tf.upper()}  -  {'شراء' if side==1 else 'بيع'}",
-                 color=col, fontsize=13, fontweight="bold", loc="left")
-    fig.text(0.5, 0.5, "Ryma Crypto", fontsize=58, color=navy, alpha=0.12, ha="center", va="center",
-             fontweight="bold", rotation=25)
+    axr.axhline(70, color="#ef5350", lw=0.7, ls="--")
+    axr.axhline(30, color="#26a69a", lw=0.7, ls="--")
+    axr.set_ylim(10, 90)
+    _style_axes([ax, axr], bg, fg, grid)
+    _time_ticks(axr, df)
+    ax.set_title(f"{sym}/USDT  -  {tf.upper()}  -  EMA / RSI", color=fg, fontsize=13, fontweight="bold", loc="left")
     fig.text(0.985, 0.012, "Ryma Crypto", fontsize=10, color="#c9a227", ha="right", va="bottom", fontweight="bold")
-    buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=130, facecolor=bg, bbox_inches="tight")
-    plt.close(fig); buf.seek(0); return buf
+    return _to_png(fig)
 
-def caption_core(res, tier="free", lang="ar"):
+def render_pattern_chart(res, tier="free"):
+    df = res["df"].tail(CHART_BARS).reset_index(drop=True)
+    lv, side, tf, sym = res["lv"], res["side"], res["tf"], res["sym"]
+    n = len(df)
+    bg, fg, grid = "#131722", "#d1d4dc", "#2a2e39"
+    fig = _new_fig(11, 7.5, bg)
+    ax = fig.add_subplot(111)
+    _draw_candles(ax, df, "#26a69a", "#ef5350")
+    for p in res.get("patterns", []):
+        name = p.get("name", "")
+        if p.get("neckline"):
+            ax.axhline(p["neckline"], color="#ffb300", lw=1.2, ls="-.")
+            ax.text(0, p["neckline"], f" {name} neckline", color="#ffb300", fontsize=8, va="bottom")
+        if name in TRENDLINE_PATTERNS:
+            sub = df.tail(40).reset_index(drop=True)
+            k_idx = np.arange(len(sub))
+            xs = k_idx + (n - len(sub))
+            for series, col in ((sub["high"].values, "#ff9800"), (sub["low"].values, "#03a9f4")):
+                slope, icpt = np.polyfit(k_idx, series.astype(float), 1)
+                ax.plot(xs, slope * k_idx + icpt, color=col, lw=1.5, ls="--")
+            ax.text(xs[0], float(sub["high"].max()), f" {name}", color="#ff9800", fontsize=8, va="bottom")
+    levels = [(lv["entry"], "Entry", "#5c6bc0", "-."), (lv["sl"], "SL", "#ef5350", "--")]
+    n_tps = 4 if tier in ("admin", "vip") else 2
+    for j, tp in enumerate(lv["tps"][:n_tps], 1):
+        levels.append((tp["px"], f"TP{j}", "#26a69a", "--"))
+    for px, label, col, ls in levels:
+        ax.axhline(px, color=col, lw=1.1, ls=ls)
+        ax.text(n + 0.5, px, f" {label} {fmt(px)}", color=col, fontsize=8, va="center", fontweight="bold")
+    prices = [float(df["low"].min()), float(df["high"].max())] + [v[0] for v in levels]
+    lo, hi = min(prices), max(prices)
+    pad = (hi - lo) * 0.05
+    ax.set_ylim(lo - pad, hi + pad)
+    ax.set_xlim(-1, n + 14)
+    _style_axes([ax], bg, fg, grid)
+    _time_ticks(ax, df)
+    title_col = "#26a69a" if side == 1 else "#ef5350"
+    ax.set_title(f"{sym}/USDT  -  {tf.upper()}  -  {'LONG' if side == 1 else 'SHORT'}",
+                 color=title_col, fontsize=13, fontweight="bold", loc="left")
+    fig.text(0.5, 0.5, "Ryma Crypto", fontsize=52, color="#ffffff", alpha=0.05,
+             ha="center", va="center", rotation=25, fontweight="bold")
+    fig.text(0.985, 0.012, "Ryma Crypto", fontsize=10, color="#c9a227", ha="right", va="bottom", fontweight="bold")
+    return _to_png(fig)
+  def caption_core(res, tier="free", lang="ar"):
     side, lv, sym = res["side"], res["lv"], res["sym"]
 
     if lang == "en":
@@ -2027,6 +2153,8 @@ def caption_core(res, tier="free", lang="ar"):
                 for p in pats[:2]
             )
             lines.append(f"🕯 Pattern: {pat_names}")
+        if grade in ("B", "C"):
+            lines += ["", "👁 <b>Watch setup:</b> enter only after breakout/breakdown is confirmed"]
         lines += ["", "━━━━━━━━━━━━━━━━", f"🎯 <b>Expected Decision: {decision}</b>"]
         lines += ["", "╔═══════ ⚠️ Alerts ═══════╗",
                   "║ 📌 Not all trades succeed",
@@ -2067,6 +2195,8 @@ def caption_core(res, tier="free", lang="ar"):
             for p in pats[:2]
         )
         lines.append(f"🕯 النموذج: {pat_names}")
+    if grade in ("B", "C"):
+        lines += ["", "👁 <b>صفقة مراقبة:</b> ادخل فقط بعد تأكيد الاختراق أو الكسر"]
     lines += ["", "━━━━━━━━━━━━━━━━", f"🎯 <b>القرار المتوقع: {decision}</b>"]
     lines += ["", "╔═══════ ⚠️ تنبيهات ═══════╗",
               "║ 📌 ليست كل صفقاتنا ناجحة",
@@ -2082,38 +2212,41 @@ def caption_vip(res, lang="ar"): return caption_core(res, "vip", lang)
 
 def keyboard_free(sym, tf, source="binance_fut"):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🧮 حاسبة المخاطر", callback_data=f"calc_risk:{sym}"),
-         InlineKeyboardButton("📊 إضافة للمحفظة", callback_data=f"add_port:{sym}")],
-        [InlineKeyboardButton("📰 آخر الأخبار", callback_data=f"news:{sym}")],
-        [InlineKeyboardButton("🌐 جميع منصات التداول", callback_data=f"refs:{source}")],
-        [InlineKeyboardButton("💎 اشترك في VIP ✨", url=VIP_INVITE_LINK)],
-        [InlineKeyboardButton("🆓 قناة التوصيات المجانية", url=CHANNEL_LINK)],
-        [InlineKeyboardButton("📞 تواصل معنا", url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")],
-        [InlineKeyboardButton("🔄 تحديث", callback_data=f"tf:{sym}:{tf}")],
+        [_btn("🧮 حاسبة المخاطر", callback_data=f"calc_risk:{sym}"),
+         _btn("📊 إضافة للمحفظة", callback_data=f"add_port:{sym}")],
+        [_btn("📰 آخر الأخبار", callback_data=f"news:{sym}")],
+        [_btn("🌐 جميع منصات التداول", callback_data=f"refs:{source}")],
+        [_btn("💎 اشترك في VIP ✨", url=VIP_INVITE_LINK)],
+        [_btn("🆓 قناة التوصيات المجانية", url=CHANNEL_LINK)],
+        [_btn("📞 تواصل معنا", url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")],
+        [_btn("📈 شارت النماذج", callback_data=f"pchart:{sym}:{tf}")],
+        [_btn("🔄 تحديث", callback_data=f"tf:{sym}:{tf}")],
     ])
 
 def keyboard_vip(sym, tf, source="binance_fut"):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🧮 حاسبة المخاطر", callback_data=f"calc_risk:{sym}"),
-         InlineKeyboardButton("📊 إضافة للمحفظة", callback_data=f"add_port:{sym}")],
-        [InlineKeyboardButton("📤 مشاركة الصفقة", callback_data=f"share:{sym}"),
-         InlineKeyboardButton("📰 آخر الأخبار", callback_data=f"news:{sym}")],
-        [InlineKeyboardButton("🌐 جميع المنصات", callback_data=f"refs:{source}")],
-        [InlineKeyboardButton("📋 القائمة", callback_data="vip_menu")],
-        [InlineKeyboardButton("🔄 تحديث", callback_data=f"tf:{sym}:{tf}")],
+        [_btn("🧮 حاسبة المخاطر", callback_data=f"calc_risk:{sym}"),
+         _btn("📊 إضافة للمحفظة", callback_data=f"add_port:{sym}")],
+        [_btn("📤 مشاركة الصفقة", callback_data=f"share:{sym}"),
+         _btn("📰 آخر الأخبار", callback_data=f"news:{sym}")],
+        [_btn("🌐 جميع المنصات", callback_data=f"refs:{source}")],
+        [_btn("📋 القائمة", callback_data="vip_menu")],
+        [_btn("📈 شارت النماذج", callback_data=f"pchart:{sym}:{tf}")],
+        [_btn("🔄 تحديث", callback_data=f"tf:{sym}:{tf}")],
     ])
 
 def keyboard_admin(sym, tf, source="binance_fut"):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🌐 جميع المنصات", callback_data=f"refs:{source}")],
-        [InlineKeyboardButton("📊 المؤشرات", callback_data=f"ind:{sym}:{tf}"),
-         InlineKeyboardButton("💧 السيولة", callback_data=f"liq:{sym}")],
-        [InlineKeyboardButton("🐋 الحيتان", callback_data=f"whale:{sym}"),
-         InlineKeyboardButton("🕯️ النماذج", callback_data=f"pat:{sym}")],
-        [InlineKeyboardButton("🧪 Backtest", callback_data=f"btcb:{sym}")],
-        [InlineKeyboardButton("📋 قائمة الأوامر الكاملة", callback_data="admin_menu")],
-        [InlineKeyboardButton("🎯 صفقة اليوم", callback_data="adm:/daily")],
-        [InlineKeyboardButton("🔄 تحديث", callback_data=f"tf:{sym}:{tf}")],
+        [_btn("🌐 جميع المنصات", callback_data=f"refs:{source}")],
+        [_btn("📊 المؤشرات", callback_data=f"ind:{sym}:{tf}"),
+         _btn("💧 السيولة", callback_data=f"liq:{sym}")],
+        [_btn("🐋 الحيتان", callback_data=f"whale:{sym}"),
+         _btn("🕯️ النماذج", callback_data=f"pat:{sym}")],
+        [_btn("🧪 Backtest", callback_data=f"btcb:{sym}")],
+        [_btn("📋 قائمة الأوامر الكاملة", callback_data="admin_menu")],
+        [_btn("🎯 صفقة اليوم", callback_data="adm:/daily")],
+        [_btn("📈 شارت النماذج", callback_data=f"pchart:{sym}:{tf}")],
+        [_btn("🔄 تحديث", callback_data=f"tf:{sym}:{tf}")],
     ])
 
 def keyboard(sym, tf, tier, source="binance_fut"):
@@ -2126,28 +2259,28 @@ def keyboard_refs(current="binance_fut"):
     if cur.startswith("binance"): cur = "binance"
     rows = []
     name, url = REFERRAL_LINKS["binance"]
-    rows.append([InlineKeyboardButton(f"🚀 {name} Futures (رسوم أقل)", url=url)])
+    rows.append([_btn(f"🚀 {name} Futures (رسوم أقل)", url=url)])
     for key, (name, url) in REFERRAL_LINKS.items():
         if key == "binance": continue
         label = f"✅ {name}" if key == cur else f"🔗 {name}"
-        rows.append([InlineKeyboardButton(label, url=url)])
-    rows.append([InlineKeyboardButton("❌ إغلاق", callback_data="close_menu")])
+        rows.append([_btn(label, url=url)])
+    rows.append([_btn("❌ إغلاق", callback_data="close_menu")])
     return InlineKeyboardMarkup(rows)
 
 def keyboard_golden_config():
     cfg = get_golden_config()
     def ic(b): return "✅" if b else "⬜"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{ic(cfg.get('require_1d_trend',False))} اتجاه 1D", callback_data="gc:require_1d_trend")],
-        [InlineKeyboardButton(f"{ic(cfg.get('require_mtf',False))} توافق MTF", callback_data="gc:require_mtf")],
-        [InlineKeyboardButton(f"{ic(cfg.get('require_rsi',True))} RSI صحي", callback_data="gc:require_rsi")],
-        [InlineKeyboardButton(f"{ic(cfg.get('require_volume',False))} حجم قوي", callback_data="gc:require_volume")],
-        [InlineKeyboardButton(f"{ic(cfg.get('require_breakout',False))} اختراق/كسر", callback_data="gc:require_breakout")],
-        [InlineKeyboardButton(f"{ic(cfg.get('require_liquidity',False))} سيولة >1M$", callback_data="gc:require_liquidity")],
-        [InlineKeyboardButton(f"{ic(cfg.get('require_alpha',False))} عملة Alpha فقط", callback_data="gc:require_alpha")],
-        [InlineKeyboardButton(f"📊 الحد الأدنى للنقاط: {cfg.get('min_score',1)}", callback_data="gc:min_score")],
-        [InlineKeyboardButton("🔄 تحديث", callback_data="gc:refresh")],
-        [InlineKeyboardButton("❌ إغلاق", callback_data="close_menu")],
+        [_btn(f"{ic(cfg.get('require_1d_trend',False))} اتجاه 1D", callback_data="gc:require_1d_trend")],
+        [_btn(f"{ic(cfg.get('require_mtf',False))} توافق MTF", callback_data="gc:require_mtf")],
+        [_btn(f"{ic(cfg.get('require_rsi',True))} RSI صحي", callback_data="gc:require_rsi")],
+        [_btn(f"{ic(cfg.get('require_volume',False))} حجم قوي", callback_data="gc:require_volume")],
+        [_btn(f"{ic(cfg.get('require_breakout',False))} اختراق/كسر", callback_data="gc:require_breakout")],
+        [_btn(f"{ic(cfg.get('require_liquidity',False))} سيولة >1M$", callback_data="gc:require_liquidity")],
+        [_btn(f"{ic(cfg.get('require_alpha',False))} عملة Alpha فقط", callback_data="gc:require_alpha")],
+        [_btn(f"📊 الحد الأدنى للنقاط: {cfg.get('min_score',1)}", callback_data="gc:min_score")],
+        [_btn("🔄 تحديث", callback_data="gc:refresh")],
+        [_btn("❌ إغلاق", callback_data="close_menu")],
     ])
 
 def build_golden_config_text():
@@ -2166,24 +2299,24 @@ def build_golden_config_text():
 
 def keyboard_vip_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💎✨ الفرصة الذهبية", callback_data="vip_cmd:/golden")],
-        [InlineKeyboardButton("🎯 صفقة اليوم", callback_data="vip_cmd:/daily")],
-        [InlineKeyboardButton("🚀 رادار النخبة (Alpha/Web3)", callback_data="vip_cmd:/alpha_v2")],
-        [InlineKeyboardButton("🔮 التنبؤ بالانفجارات", callback_data="vip_cmd:/predict")],
-        [InlineKeyboardButton("🐋 رادار الحيتان", callback_data="vip_cmd:/whales")],
-        [InlineKeyboardButton("💥 رادار الانفجارات", callback_data="vip_cmd:/explosions")],
-        [InlineKeyboardButton("🚀 عملات صاعدة", callback_data="vip_cmd:/pump")],
-        [InlineKeyboardButton("📉 رادار القيعان الذكي", callback_data="vip_cmd:/bottom")],
-        [InlineKeyboardButton("🔻 رادار فرص الشورت", callback_data="vip_cmd:/shortsradar")],
-        [InlineKeyboardButton("⭐ رادار Alpha الأسبوعي", callback_data="vip_cmd:/alpha")],
-        [InlineKeyboardButton("💧 رادار السيولة", callback_data="vip_cmd_args:liquidity")],
-        [InlineKeyboardButton("📊 بيانات الفيوتشر", callback_data="vip_cmd_args:futures")],
-        [InlineKeyboardButton("📈 الصفقات النشطة", callback_data="vip_cmd:/active")],
-        [InlineKeyboardButton("🔗 رابط الإحالة", callback_data="my_ref"),
-         InlineKeyboardButton("🎯 نقاطي", callback_data="my_points")],
-        [InlineKeyboardButton("🌐 منصات التداول", callback_data="refs:binance_fut")],
-        [InlineKeyboardButton("🆓 قناة التوصيات المجانية", url=CHANNEL_LINK)],
-        [InlineKeyboardButton("❌ إغلاق القائمة", callback_data="close_menu")],
+        [_btn("💎✨ الفرصة الذهبية", callback_data="vip_cmd:/golden")],
+        [_btn("🎯 صفقة اليوم", callback_data="vip_cmd:/daily")],
+        [_btn("🚀 رادار النخبة (Alpha/Web3)", callback_data="vip_cmd:/alpha_v2")],
+        [_btn("🔮 التنبؤ بالانفجارات", callback_data="vip_cmd:/predict")],
+        [_btn("🐋 رادار الصفقات الكبيرة", callback_data="vip_cmd:/whales")],
+        [_btn("💥 رادار الانفجارات", callback_data="vip_cmd:/explosions")],
+        [_btn("🚀 عملات صاعدة", callback_data="vip_cmd:/pump")],
+        [_btn("📉 رادار القيعان الذكي", callback_data="vip_cmd:/bottom")],
+        [_btn("🔻 رادار فرص الشورت", callback_data="vip_cmd:/shortsradar")],
+        [_btn("⭐ رادار Alpha الأسبوعي", callback_data="vip_cmd:/alpha")],
+        [_btn("💧 رادار السيولة", callback_data="vip_cmd_args:liquidity")],
+        [_btn("📊 بيانات الفيوتشر", callback_data="vip_cmd_args:futures")],
+        [_btn("📈 الصفقات النشطة", callback_data="vip_cmd:/active")],
+        [_btn("🔗 رابط الإحالة", callback_data="my_ref"),
+         _btn("🎯 نقاطي", callback_data="my_points")],
+        [_btn("🌐 منصات التداول", callback_data="refs:binance_fut")],
+        [_btn("🆓 قناة التوصيات المجانية", url=CHANNEL_LINK)],
+        [_btn("❌ إغلاق القائمة", callback_data="close_menu")],
     ])
 
 def build_vip_menu_text():
@@ -2229,45 +2362,45 @@ def build_admin_menu_text():
 def keyboard_admin_menu():
     multi_icon = "✅" if is_multi_exchange() else "❌"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚡ تشغيل النشر", callback_data="adm:/forcepost"),
-         InlineKeyboardButton("🧹 تفريغ الصفقات", callback_data="adm:/clearsignals")],
-        [InlineKeyboardButton("🛠 وضع الصيانة", callback_data="toggle_maintenance"),
-         InlineKeyboardButton(f"🌐 تعدد المنصات: {multi_icon}", callback_data="toggle_multi_exchange")],
-        [InlineKeyboardButton("💎 إعدادات الذهبية", callback_data="adm:/goldenconfig")],
-        [InlineKeyboardButton("📤 مشاركة صفقة اجتماعياً", callback_data="adm_args:share")],
-        [InlineKeyboardButton("💎✨ الفرصة الذهبية", callback_data="adm:/golden"),
-         InlineKeyboardButton("🎯 صفقة اليوم", callback_data="adm:/daily")],
-        [InlineKeyboardButton("🌟 التقاطعات", callback_data="adm:/cross"),
-         InlineKeyboardButton("🔍 تشخيص", callback_data="adm:/debug")],
-        [InlineKeyboardButton("📊 فحص السوق", callback_data="adm:/scan"),
-         InlineKeyboardButton("🔻 فرص شورت", callback_data="adm:/short")],
-        [InlineKeyboardButton("🔮 التنبؤ", callback_data="adm:/predict"),
-         InlineKeyboardButton("🐋 الحيتان", callback_data="adm:/whales")],
-        [InlineKeyboardButton("💥 الانفجارات", callback_data="adm:/explosions"),
-         InlineKeyboardButton("🚀 الصعود", callback_data="adm:/pump")],
-        [InlineKeyboardButton("📉 القيعان", callback_data="adm:/bottom"),
-         InlineKeyboardButton("🔻 شورت رادار", callback_data="adm:/shortsradar")],
-        [InlineKeyboardButton("⭐ Alpha", callback_data="adm:/alpha"),
-         InlineKeyboardButton("🚀 رادار النخبة (Alpha Pro)", callback_data="adm:/alpha_v2")],
-        [InlineKeyboardButton("🕯️ فحص النماذج (تلقائي)", callback_data="adm:/patterns"),
-         InlineKeyboardButton("🧪 Backtest", callback_data="adm:/bt")],
-        [InlineKeyboardButton("🧪 Backtest TOP50", callback_data="adm:/bt50"),
-         InlineKeyboardButton("👥 المستخدمون", callback_data="adm:/users")],
-        [InlineKeyboardButton("💎 قائمة VIP", callback_data="adm:/viplist"),
-         InlineKeyboardButton("📈 إحصائيات", callback_data="adm:/stats")],
-        [InlineKeyboardButton("🗂 السجل", callback_data="adm:/history"),
-         InlineKeyboardButton("🎛 لوحة التحكم", callback_data="adm:/dashboard")],
-        [InlineKeyboardButton("📢 اختبار القنوات", callback_data="adm:/testchannels"),
-         InlineKeyboardButton("🗑 قائمة الحذف", callback_data="adm:/delist")],
-        [InlineKeyboardButton("🎁 إضافة نقاط", callback_data="adm_args:addpoints")],
-        [InlineKeyboardButton("💧 السيولة", callback_data="adm_args:liquidity"),
-         InlineKeyboardButton("📊 فيوتشر", callback_data="adm_args:futures")],
-        [InlineKeyboardButton("💲 أسعار", callback_data="adm_args:price"),
-         InlineKeyboardButton("🔎 لماذا", callback_data="adm_args:why")],
-        [InlineKeyboardButton("📝 نشر توصية", callback_data="adm_args:post"),
-         InlineKeyboardButton("➕ إضافة VIP", callback_data="adm_args:addvip")],
-        [InlineKeyboardButton("➖ إزالة VIP", callback_data="adm_args:removevip"),
-         InlineKeyboardButton("❌ إغلاق القائمة", callback_data="close_menu")],
+        [_btn("⚡ تشغيل النشر", callback_data="adm:/forcepost"),
+         _btn("🧹 تفريغ الصفقات", callback_data="adm:/clearsignals")],
+        [_btn("🛠 وضع الصيانة", callback_data="toggle_maintenance"),
+         _btn(f"🌐 تعدد المنصات: {multi_icon}", callback_data="toggle_multi_exchange")],
+        [_btn("💎 إعدادات الذهبية", callback_data="adm:/goldenconfig")],
+        [_btn("📤 مشاركة صفقة اجتماعياً", callback_data="adm_args:share")],
+        [_btn("💎✨ الفرصة الذهبية", callback_data="adm:/golden"),
+         _btn("🎯 صفقة اليوم", callback_data="adm:/daily")],
+        [_btn("🌟 التقاطعات", callback_data="adm:/cross"),
+         _btn("🔍 تشخيص", callback_data="adm:/debug")],
+        [_btn("📊 فحص السوق", callback_data="adm:/scan"),
+         _btn("🔻 فرص شورت", callback_data="adm:/short")],
+        [_btn("🔮 التنبؤ", callback_data="adm:/predict"),
+         _btn("🐋 الحيتان", callback_data="adm:/whales")],
+        [_btn("💥 الانفجارات", callback_data="adm:/explosions"),
+         _btn("🚀 الصعود", callback_data="adm:/pump")],
+        [_btn("📉 القيعان", callback_data="adm:/bottom"),
+         _btn("🔻 شورت رادار", callback_data="adm:/shortsradar")],
+        [_btn("⭐ Alpha", callback_data="adm:/alpha"),
+         _btn("🚀 رادار النخبة (Alpha Pro)", callback_data="adm:/alpha_v2")],
+        [_btn("🕯️ فحص النماذج (تلقائي)", callback_data="adm:/patterns"),
+         _btn("🧪 Backtest", callback_data="adm:/bt")],
+        [_btn("🧪 Backtest TOP50", callback_data="adm:/bt50"),
+         _btn("👥 المستخدمون", callback_data="adm:/users")],
+        [_btn("💎 قائمة VIP", callback_data="adm:/viplist"),
+         _btn("📈 إحصائيات", callback_data="adm:/stats")],
+        [_btn("🗂 السجل", callback_data="adm:/history"),
+         _btn("🎛 لوحة التحكم", callback_data="adm:/dashboard")],
+        [_btn("📢 اختبار القنوات", callback_data="adm:/testchannels"),
+         _btn("🗑 قائمة الحذف", callback_data="adm:/delist")],
+        [_btn("🎁 إضافة نقاط", callback_data="adm_args:addpoints")],
+        [_btn("💧 السيولة", callback_data="adm_args:liquidity"),
+         _btn("📊 فيوتشر", callback_data="adm_args:futures")],
+        [_btn("💲 أسعار", callback_data="adm_args:price"),
+         _btn("🔎 لماذا", callback_data="adm_args:why")],
+        [_btn("📝 نشر توصية", callback_data="adm_args:post"),
+         _btn("➕ إضافة VIP", callback_data="adm_args:addvip")],
+        [_btn("➖ إزالة VIP", callback_data="adm_args:removevip"),
+         _btn("❌ إغلاق القائمة", callback_data="close_menu")],
     ])
 
 def build_admin_extras(res):
@@ -2289,6 +2422,8 @@ def build_admin_extras(res):
     lines.append("")
     for i,tp in enumerate(res['lv']['tps'], 1):
         lines.append(f"🎯 هدف {i}: {tp['pct']}%")
+    liq = futures_liquidations(res['sym'])
+    if liq: lines.append(f"💥 تصفيات: شراء ${liq['long_liq']:,.0f} | بيع ${liq['short_liq']:,.0f}")
     return "\n".join(lines)
 
 def active_signals():
@@ -2316,7 +2451,7 @@ async def publish(bot, res, vip=True, free=False, admin_copy=False):
     try:
         if vip and VIP_CHANNEL_ID:
             img = await asyncio.to_thread(render_chart, res, "vip", True)
-            await bot.send_photo(VIP_CHANNEL_ID, img, caption=caption_vip(res), 
+            await bot.send_photo(VIP_CHANNEL_ID, img, caption=caption_vip(res),
                                  parse_mode=ParseMode.HTML, protect_content=PROTECT,
                                  reply_markup=keyboard_vip(res["sym"], res["tf"], source))
             sent.append("VIP")
@@ -2461,16 +2596,14 @@ async def tracker_loop(app):
             cycle += 1
             if cycle % CLEANUP_EVERY_CYCLES == 0: await asyncio.to_thread(smart_cleanup_trades)
             notes = await asyncio.to_thread(check_signals_sync)
-            for coin, tf, side, e, R in notes:
-                trade_obj = None
+            for coin, tf, side, e, R, trade_id in notes:
                 with store.lock:
-                    for p in store.data["signals"]:
-                        if p["coin"] == coin and p["tf"] == tf and p["side"] == side: trade_obj = p; break
-                if not trade_obj: continue
-                full_msg = event_text(coin, tf, side, e, R, "vip", trade=trade_obj)
-                if full_msg:
-                    await notify_both(app.bot, full_msg, protect=True)
-                    await notify_free(app.bot, full_msg)
+                    found = next((dict(p) for p in store.data["signals"] if p.get("id") == trade_id), None)
+                if not found: continue
+                vip_msg = event_text(coin, tf, side, e, R, "vip", trade=found)
+                if vip_msg: await notify_both(app.bot, vip_msg, protect=True)
+                free_msg = free_event_text(coin, tf, side, e, R, found)
+                if free_msg and CHANNEL_ID: await notify_free(app.bot, free_msg)
         except asyncio.CancelledError: raise
         except Exception: log.exception("tracker")
         await asyncio.sleep(300)
@@ -2651,9 +2784,10 @@ async def whale_hunter_loop(app):
                     with _ex_lock["binance"]:
                         trades = ex.fetch_trades(f"{s}/USDT", limit=50)
                     for tr in trades:
+                        tid = tr.get("id") or f"{tr.get('timestamp')}_{tr.get('price')}_{tr.get('amount')}"
                         notional = float(tr.get("price", 0)) * float(tr.get("amount", 0))
                         if notional >= 50000:
-                            trade_id = f"{s}_{tr.get('id')}"
+                            trade_id = f"{s}_{tid}"
                             if trade_id in _seen_whales: continue
                             _seen_whales.add(trade_id)
                             if len(_seen_whales) > 1000: _seen_whales.clear()
@@ -2661,8 +2795,8 @@ async def whale_hunter_loop(app):
                             price = float(tr.get("price", 0))
                             text, share_url = build_whale_tweet(s, side, notional, price)
                             kb = InlineKeyboardMarkup([
-                                [InlineKeyboardButton("🚀 انشر على تويتر (X)", url=share_url)],
-                                [InlineKeyboardButton("📋 رابط التسجيل فقط", url=REFERRAL_LINKS["binance"][1])]
+                                [_btn("🚀 انشر على تويتر (X)", url=share_url)],
+                                [_btn("📋 رابط التسجيل فقط", url=REFERRAL_LINKS["binance"][1])]
                             ])
                             await app.bot.send_message(
                                 ADMIN_ID,
@@ -2795,10 +2929,14 @@ def admin_only(fn):
     async def wrapper(update, ctx):
         if not ADMIN_ID or not update.effective_user or update.effective_user.id != ADMIN_ID:
             lang = get_user_lang(update.effective_user.id) if update.effective_user else "ar"
-            await update.message.reply_text(t("admin_only", lang)); return
+            try: await update.message.reply_text(t("admin_only", lang))
+            except Exception: pass
+            return
         try: return await fn(update, ctx)
         except Exception as e:
-            log.exception("admin"); await update.message.reply_text(f"⚠️ {str(e)[:200]}")
+            log.exception("admin")
+            try: await update.message.reply_text(f"⚠️ {str(e)[:200]}")
+            except Exception: pass
     return wrapper
 
 def vip_only(fn):
@@ -2810,11 +2948,15 @@ def vip_only(fn):
         rec = store.data["users"].get(str(u.id), {})
         st, _ = user_status(u.id, rec)
         if st not in ("admin","vip","trial","warning"):
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 اشترك في VIP" if lang=="ar" else "💎 Subscribe to VIP", url=VIP_INVITE_LINK)]])
-            await update.message.reply_text(t("vip_only", lang), reply_markup=kb); return
+            kb = InlineKeyboardMarkup([[_btn("💎 اشترك في VIP" if lang=="ar" else "💎 Subscribe to VIP", url=VIP_INVITE_LINK)]])
+            try: await update.message.reply_text(t("vip_only", lang), reply_markup=kb)
+            except Exception: pass
+            return
         try: return await fn(update, ctx)
         except Exception as e:
-            log.exception("vip"); await update.message.reply_text(f"⚠️ {str(e)[:200]}")
+            log.exception("vip")
+            try: await update.message.reply_text(f"⚠️ {str(e)[:200]}")
+            except Exception: pass
     return wrapper
 
 def clean_symbol(text):
@@ -2841,40 +2983,6 @@ async def gate(update):
             await update.message.reply_text(t("wait_3s", lang)); return st, False
         _cooldown[user.id] = time.time()
     return st, True
-
-async def handle_symbol(update, raw, to_channel=False):
-    st, ok = await gate(update)
-    if not ok: return
-    lang = get_user_lang(update.effective_user.id)
-    sym = clean_symbol(raw)
-    if not sym: await update.message.reply_text(t("invalid_symbol", lang)); return
-    if sym in EXCLUDE_TICKERS:
-        await update.message.reply_text(t("not_supported", lang)); return
-    wait = await update.message.reply_text(t("analyzing", lang, sym=sym))
-    try:
-        res = await asyncio.to_thread(get_analysis, sym)
-        tier = "admin" if st=="admin" else ("vip" if st=="vip" else "free")
-        source = res.get("source", "binance_fut")
-        kb = keyboard(sym, res["tf"], tier, source)
-        img = await asyncio.to_thread(render_chart, res, tier)
-        cap = caption_core(res, "vip" if tier in ("admin","vip") else "free", lang)
-        await update.message.reply_photo(photo=img, caption=cap, parse_mode=ParseMode.HTML,
-                                         protect_content=(st!="admin" and PROTECT), reply_markup=kb)
-        if st == "admin":
-            await send_admin_copy(update.message, res)
-        cur_pts = store.data["users"].get(str(update.effective_user.id), {}).get("points", 0)
-        bot_un = ctx.application.bot_data.get("username", "") if hasattr(ctx, "application") else ""
-        await send_points_flash(update.message, cur_pts, update.effective_user.id, bot_un)
-    except PairNotFound:
-        await update.message.reply_text(t("not_found", lang, sym=sym))
-    except NoData:
-        await update.message.reply_text(t("no_data", lang))
-    except Exception:
-        log.exception("handle")
-        await update.message.reply_text(t("error", lang))
-    finally:
-        try: await wait.delete()
-        except Exception: pass
 
 async def cmd_start(update, ctx):
     if is_maintenance() and update.effective_user.id != ADMIN_ID:
@@ -2924,17 +3032,17 @@ async def cmd_start(update, ctx):
         except Exception: pass
         rec["points"] = reward_pts
 
-    bot_username = ctx.application.bot_data.get("username", "")
+    bot_username = ctx.bot_data.get("username", "")
     ref_link = f"https://t.me/{bot_username}?start=ref_{u.id}" if bot_username else None
 
     if lang == "en":
-        rows = [[InlineKeyboardButton("📊 My Portfolio", callback_data="my_portfolio")]]
+        rows = [[_btn("📊 My Portfolio", callback_data="my_portfolio")]]
         if ref_link:
-            rows.append([InlineKeyboardButton("🔗 Referral Link", copy_text=CopyTextButton(text=ref_link))])
+            rows.append([_btn("🔗 Referral Link", url=f"https://t.me/share/url?url=&text={urllib.parse.quote(ref_link)}")])
         rows += [
-            [InlineKeyboardButton("💎 Subscribe to VIP ✨", url=VIP_INVITE_LINK)],
-            [InlineKeyboardButton("🆓 Signals Channel", url=CHANNEL_LINK)],
-            [InlineKeyboardButton("📞 Contact", url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")],
+            [_btn("💎 Subscribe to VIP ✨", url=VIP_INVITE_LINK)],
+            [_btn("🆓 Signals Channel", url=CHANNEL_LINK)],
+            [_btn("📞 Contact", url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")],
         ]
         ref_text = f"\n\n🔗 Your link:\n<code>{ref_link}</code>" if ref_link else ""
         welcome = (f"Welcome {u.first_name}! 👋\n\n"
@@ -2946,13 +3054,13 @@ async def cmd_start(update, ctx):
                    f"• Invite new subscriber = <b>{POINTS_REFERRAL} points</b>\n\n"
                    f"🎁 {VIP_THRESHOLD} points = VIP {VIP_REWARD_DAYS} day free{ref_text}")
     else:
-        rows = [[InlineKeyboardButton("📊 محفظتي", callback_data="my_portfolio")]]
+        rows = [[_btn("📊 محفظتي", callback_data="my_portfolio")]]
         if ref_link:
-            rows.append([InlineKeyboardButton("🔗 رابط الإحالة", copy_text=CopyTextButton(text=ref_link))])
+            rows.append([_btn("🔗 رابط الإحالة", url=f"https://t.me/share/url?url=&text={urllib.parse.quote(ref_link)}")])
         rows += [
-            [InlineKeyboardButton("💎 اشترك في VIP ✨", url=VIP_INVITE_LINK)],
-            [InlineKeyboardButton("🆓 قناة التوصيات", url=CHANNEL_LINK)],
-            [InlineKeyboardButton("📞 تواصل", url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")],
+            [_btn("💎 اشترك في VIP ✨", url=VIP_INVITE_LINK)],
+            [_btn("🆓 قناة التوصيات", url=CHANNEL_LINK)],
+            [_btn("📞 تواصل", url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")],
         ]
         ref_text = f"\n\n🔗 رابطك:\n<code>{ref_link}</code>" if ref_link else ""
         welcome = (f"أهلاً {u.first_name}! 👋\n\n"
@@ -2997,9 +3105,9 @@ async def cmd_myid(update, ctx):
 async def cmd_vip(update, ctx):
     u = update.effective_user; touch_user(u, "/vip")
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💎 اشترك الآن ✨", url=VIP_INVITE_LINK)],
-        [InlineKeyboardButton("🆓 قناة التوصيات المجانية", url=CHANNEL_LINK)],
-        [InlineKeyboardButton("📞 تواصل معنا", url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")],
+        [_btn("💎 اشترك الآن ✨", url=VIP_INVITE_LINK)],
+        [_btn("🆓 قناة التوصيات المجانية", url=CHANNEL_LINK)],
+        [_btn("📞 تواصل معنا", url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")],
     ])
     await update.message.reply_text(build_vip_page(), reply_markup=kb)
 
@@ -3011,7 +3119,7 @@ async def cmd_menu(update, ctx):
         await update.message.reply_text(build_admin_menu_text(),
                                         reply_markup=keyboard_admin_menu(), parse_mode=ParseMode.HTML); return
     if st not in ("vip","trial","warning"):
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 اشترك في VIP", url=VIP_INVITE_LINK)]])
+        kb = InlineKeyboardMarkup([[_btn("💎 اشترك في VIP", url=VIP_INVITE_LINK)]])
         await update.message.reply_text("🔒 القائمة لمشتركي VIP فقط", reply_markup=kb); return
     await update.message.reply_text(build_vip_menu_text(), reply_markup=keyboard_vip_menu())
 
@@ -3020,7 +3128,7 @@ async def cmd_daily(update, ctx):
     if not u: return
     rec = store.data["users"].get(str(u.id), {}); st, _ = user_status(u.id, rec)
     if st not in ("admin", "vip", "trial", "warning"):
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 اشترك في VIP", url=VIP_INVITE_LINK)]])
+        kb = InlineKeyboardMarkup([[_btn("💎 اشترك في VIP", url=VIP_INVITE_LINK)]])
         await update.message.reply_text("🔒 الأمر حصري للمشتركين", reply_markup=kb); return
     touch_user(u, "/daily")
     wait = await update.message.reply_text("🎯 جلب Top Movers...")
@@ -3067,7 +3175,7 @@ async def cmd_portfolio(update, ctx):
 
 async def cmd_myref(update, ctx):
     u = update.effective_user
-    bot_username = ctx.application.bot_data.get("username", "")
+    bot_username = ctx.bot_data.get("username", "")
     if not bot_username:
         await update.message.reply_text("⚠️ غير متاح حالياً، جرب بعد دقيقة"); return
     ref_link = f"https://t.me/{bot_username}?start=ref_{u.id}"
@@ -3087,7 +3195,7 @@ async def cmd_points(update, ctx):
     u = update.effective_user
     rec = store.data["users"].get(str(u.id), {})
     pts = rec.get("points", 0)
-    bot_username = ctx.application.bot_data.get("username", "")
+    bot_username = ctx.bot_data.get("username", "")
     ref_link = f"https://t.me/{bot_username}?start=ref_{u.id}" if bot_username else "—"
     await update.message.reply_text(
         f"🎯 <b>نقاطك:</b> {pts}/{VIP_THRESHOLD}\n\n"
@@ -3162,9 +3270,9 @@ async def cmd_cross(update, ctx):
         if not found: await wait.edit_text("🌟 لا توجد تقاطعات"); return
         lines = ["🌟 التقاطعات:", ""]
         for sym, c in found:
-            t = "🌟 ذهبي" if c["type"]=="golden" else "💀 موت"
+            tt = "🌟 ذهبي" if c["type"]=="golden" else "💀 موت"
             dec = "🟢 شراء" if c["type"]=="golden" else "🔴 بيع"
-            lines += [f"{t} #{sym} — {fmt(c['price'])}", f"   🎯 القرار المتوقع: {dec}"]
+            lines += [f"{tt} #{sym} — {fmt(c['price'])}", f"   🎯 القرار المتوقع: {dec}"]
         await wait.edit_text("\n".join(lines)[:4000], link_preview_options=NO_PREVIEW)
     except Exception as e:
         log.exception("cross"); await wait.edit_text(f"⚠️ {str(e)[:200]}")
@@ -3202,28 +3310,36 @@ async def cmd_predict(update, ctx):
 
 @vip_only
 async def cmd_whales(update, ctx):
-    wait = await update.message.reply_text("🐋 فحص الحيتان...")
+    wait = await update.message.reply_text("🐋 فحص الصفقات الكبيرة...")
     syms = await asyncio.to_thread(top_symbols, 30); rows = []
     for s in syms[:15]:
         w, largest, bv, sv = await asyncio.to_thread(whale_radar, s)
         if w and w >= 1: rows.append((s, w, largest, bv, sv))
-    if not rows:
+    lines = []
+    if rows:
+        rows.sort(key=lambda x: -x[2])
+        lines += ["🐋 <b>رادار الصفقات الكبيرة (فوق 5 آلاف دولار)</b>", "━━━━━━━━━━━━━━━━", ""]
+        for s, w, largest, bv, sv in rows[:10]:
+            total = bv + sv; buy_pct = (bv / total * 100) if total > 0 else 0
+            direction = "🟢 شراء" if buy_pct > 55 else ("🔴 بيع" if buy_pct < 45 else "⚖️ متذبذب")
+            lines += [f"🐋 <b>#{s}</b>", f"   🔢 {w} صفقة كبيرة",
+                      f"   💰 أكبر صفقة: <b>${largest:,.0f}</b>",
+                      f"   📊 الاتجاه: <b>{direction}</b> ({buy_pct:.0f}%)",
+                      f"   🎯 القرار المتوقع: {direction}", ""]
+    else:
         fallback_syms = await asyncio.to_thread(top_symbols, 5)
-        lines = ["🐋 <b>السوق هادئ جداً الآن (لا توجد تحركات حيتان)</b>", "👇 إليك أنشط العملات حالياً للمراقبة:", ""]
+        lines += ["🐋 <b>لا توجد صفقات كبيرة حالياً على Binance</b>", "👇 إليك أنشط العملات للمراقبة:", ""]
         for s in fallback_syms:
             lines.append(f"• #{s} — 🎯 القرار المتوقع: مراقبة")
-        await wait.edit_text("\n".join(lines), parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
-        return
-    rows.sort(key=lambda x: -x[2])
-    lines = ["🐋 <b>رادار الحيتان (فوق 5 آلاف دولار)</b>", "━━━━━━━━━━━━━━━━", ""]
-    for s, w, largest, bv, sv in rows[:10]:
-        total = bv + sv; buy_pct = (bv / total * 100) if total > 0 else 0
-        direction = "🟢 شراء" if buy_pct > 55 else ("🔴 بيع" if buy_pct < 45 else "⚖️ متذبذب")
-        lines += [f"🐋 <b>#{s}</b>", f"   🔢 {w} صفقة كبيرة",
-                  f"   💰 أكبر صفقة: <b>${largest:,.0f}</b>",
-                  f"   📊 الاتجاه: <b>{direction}</b> ({buy_pct:.0f}%)",
-                  f"   🎯 القرار المتوقع: {direction}", ""]
-    await wait.edit_text("\n".join(lines), parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
+    if ETHERSCAN_KEY and ETH_WATCH:
+        eth_flows = await asyncio.to_thread(eth_exchange_flows, 1)
+        if eth_flows:
+            lines += ["", "🔷 <b>تدفقات ETH من عناوين البورصات (آخر ساعة):</b>"] + eth_flows
+    if WHALE_ALERT_KEY:
+        onchain = await asyncio.to_thread(whale_alert_recent, 1_000_000)
+        if onchain:
+            lines += ["", "🌍 <b>تحويلات on-chain كبيرة (آخر 60 دقيقة):</b>"] + onchain[:6]
+    await wait.edit_text("\n".join(lines)[:4000], parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
 
 @vip_only
 async def cmd_liquidity(update, ctx):
@@ -3900,14 +4016,13 @@ async def cb_handler(update, ctx):
         return
 
     if q.data == "my_portfolio":
-        fake_update = Update(update.update_id, message=q.message, effective_user=q.from_user)
-        await cmd_portfolio(fake_update, ctx)
+        await cmd_portfolio(_FakeUpdate(q.message, q.from_user), ctx)
         return
 
     if q.data == "my_points":
         rec = store.data["users"].get(str(q.from_user.id), {})
         pts = rec.get("points", 0)
-        bot_username = ctx.application.bot_data.get("username", "")
+        bot_username = ctx.bot_data.get("username", "")
         ref_link = f"https://t.me/{bot_username}?start=ref_{q.from_user.id}" if bot_username else "—"
         await q.message.reply_text(
             f"🎯 <b>نقاطك:</b> {pts}/{VIP_THRESHOLD}\n\n"
@@ -3923,7 +4038,7 @@ async def cb_handler(update, ctx):
         return
 
     if q.data == "my_ref":
-        bot_username = ctx.application.bot_data.get("username", "")
+        bot_username = ctx.bot_data.get("username", "")
         if not bot_username:
             await q.message.reply_text("⚠️ جرب بعد دقيقة"); return
         ref_link = f"https://t.me/{bot_username}?start=ref_{q.from_user.id}"
@@ -4033,9 +4148,9 @@ async def cb_handler(update, ctx):
 
     if q.data in ("vip", "vip_page"):
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💎 الانضمام لقناة VIP ✨", url=VIP_INVITE_LINK)],
-            [InlineKeyboardButton("🆓 قناة التوصيات المجانية", url=CHANNEL_LINK)],
-            [InlineKeyboardButton("🎁 تجربة يوم", callback_data="vip_trial")],
+            [_btn("💎 الانضمام لقناة VIP ✨", url=VIP_INVITE_LINK)],
+            [_btn("🆓 قناة التوصيات المجانية", url=CHANNEL_LINK)],
+            [_btn("🎁 تجربة يوم", callback_data="vip_trial")],
         ])
         try: await q.message.reply_text(build_vip_page(), reply_markup=kb)
         except Exception: pass
@@ -4048,14 +4163,14 @@ async def cb_handler(update, ctx):
             if u_rec.get("trial_used"):
                 await q.message.reply_text("⛔ استخدمت التجربة",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("💎 اشترك", url=VIP_INVITE_LINK)]]))
+                        [_btn("💎 اشترك", url=VIP_INVITE_LINK)]]))
                 return
             u_rec["trial_used"] = True
             store.data["users"][uid] = u_rec; store.save("users")
         add_vip(u.id, 1)
         await q.message.reply_text("🎉 تجربة VIP 24 ساعة!",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📋 البدء", callback_data="vip_menu")]]))
+                [_btn("📋 البدء", callback_data="vip_menu")]]))
         return
 
     if q.data == "vip_menu":
@@ -4137,6 +4252,24 @@ async def cb_handler(update, ctx):
         except Exception: pass
         return
 
+    if q.data.startswith("pchart:"):
+        parts = q.data.split(":"); sym = parts[1]
+        rec = store.data["users"].get(str(q.from_user.id), {})
+        st, _ = user_status(q.from_user.id, rec)
+        if st == "blocked": await q.message.reply_text(t("blocked", "ar", contact=CONTACT_LINK)); return
+        if is_maintenance() and st != "admin": await q.message.reply_text(t("maintenance", "ar", contact=CONTACT_LINK)); return
+        tier = "admin" if st == "admin" else ("vip" if st == "vip" else "free")
+        try:
+            res = await asyncio.to_thread(get_analysis, sym)
+            img = await asyncio.to_thread(render_pattern_chart, res, tier)
+            await ctx.bot.send_photo(q.message.chat.id, photo=img,
+                                     caption=f"📈 شارت النماذج — #{sym}/USDT ({res['tf'].upper()})",
+                                     protect_content=(st != "admin" and PROTECT))
+        except Exception:
+            log.exception("pchart")
+            await q.message.reply_text("⚠️ تعذر إنشاء الشارت الآن")
+        return
+
     if q.data.startswith("tf:"):
         parts = q.data.split(":"); sym, tf = parts[1], parts[2]
         user = touch_user(q.from_user, "refresh")
@@ -4150,14 +4283,80 @@ async def cb_handler(update, ctx):
             kb = keyboard(sym, res["tf"], tier, source)
             img = await asyncio.to_thread(render_chart, res, tier)
             cap = caption_core(res, "vip" if tier in ("admin","vip") else "free", lang)
-            await ctx.bot.send_photo(q.message.chat.id, photo=img, caption=cap,
+            await ctx.bot.send_photo(q.message.chat.id, photo=img, caption=cap, parse_mode=ParseMode.HTML,
                                      protect_content=(st!="admin" and PROTECT), reply_markup=kb)
             if tier == "admin":
                 await send_admin_copy(q.message, res)
             cur_pts = store.data["users"].get(str(q.from_user.id), {}).get("points", 0)
-            bot_un = ctx.application.bot_data.get("username", "")
+            bot_un = ctx.bot_data.get("username", "")
             await send_points_flash(q.message, cur_pts, q.from_user.id, bot_un)
         except Exception: pass
+
+def free_event_text(coin, tf, side, e, R, trade):
+    k = e["kind"]
+    if k == "TP" and e.get("j", 99) > 2: return None
+    if k in ("ENTRY", "BE_MOVED"): return None
+    t2 = dict(trade); t2["tps"] = [dict(x) for x in trade["tps"][:2]]
+    return event_text(coin, tf, side, e, R, "free", trade=t2)
+
+def grade_winrate(grade):
+    with store.lock:
+        h = [x for x in store.data["history"] if x.get("grade") == grade]
+    if len(h) < 20: return None, len(h)
+    wins = sum(1 for x in h if (x.get("R") or 0) > 0)
+    return round(100 * wins / len(h), 1), len(h)
+
+def admin_stats_line(res):
+    wr, n = grade_winrate(res.get("grade"))
+    if wr is None:
+        return f"📊 [أدمن] درجة {res.get('grade')}: بيانات غير كافية ({n}/20 صفقة مغلقة)"
+    return f"📊 [أدمن] درجة {res.get('grade')}: نجاح تاريخي {wr}% من {n} صفقة"
+
+def eth_exchange_flows(hours=1, min_eth=ETH_MIN_TX):
+    if not ETHERSCAN_KEY or not ETH_WATCH: return []
+    out = []; start_ts = time.time() - hours * 3600
+    for addr in ETH_WATCH[:10]:
+        try:
+            r = requests.get("https://api.etherscan.io/v2/api",
+                             params={"chainid": 1, "module": "account", "action": "txlist",
+                                     "address": addr, "startblock": 0, "endblock": 99999999,
+                                     "page": 1, "offset": 50, "sort": "desc", "apikey": ETHERSCAN_KEY},
+                             timeout=10)
+            data = r.json()
+            if str(data.get("status")) != "1": continue
+            for tx in data.get("result", []):
+                if int(tx.get("timeStamp", 0)) < start_ts: break
+                eth = int(tx.get("value", 0)) / 1e18
+                if eth < min_eth: continue
+                frm = (tx.get("from") or "").lower(); to = (tx.get("to") or "").lower()
+                if to == addr: flow = "إيداع في البورصة (ضغط بيع محتمل)"
+                elif frm == addr: flow = "سحب من البورصة (تجميع محتمل)"
+                else: continue
+                out.append(f"• ETH {eth:,.0f} — {flow}")
+        except Exception: continue
+        time.sleep(0.25)
+    return out[:10]
+
+def whale_alert_recent(min_usd=1_000_000, minutes=60):
+    if not WHALE_ALERT_KEY: return []
+    try:
+        start = int(time.time()) - minutes * 60
+        r = requests.get("https://api.whale-alert.io/v1/transactions",
+                         params={"api_key": WHALE_ALERT_KEY, "min_value": int(min_usd), "start": start},
+                         timeout=10)
+        if r.status_code != 200: return []
+        out = []
+        for tx in r.json().get("transactions", []):
+            sym = (tx.get("symbol") or "").upper()
+            usd = float(tx.get("amount_usd") or 0)
+            frm = (tx.get("from") or {}).get("owner_type", "unknown")
+            to = (tx.get("to") or {}).get("owner_type", "unknown")
+            if to == "exchange" and frm != "exchange": flow = "إيداع في بورصة (ضغط بيع محتمل)"
+            elif frm == "exchange" and to != "exchange": flow = "سحب من بورصة (تجميع محتمل)"
+            else: flow = "تحويل بين محافظ"
+            out.append(f"• {sym} ${usd:,.0f} — {flow}")
+        return out
+    except Exception: return []
 
 async def on_error(update, ctx):
     log.error("err: %s", ctx.error, exc_info=ctx.error)
@@ -4167,7 +4366,12 @@ async def on_text(update, ctx):
     text = update.message.text.strip()
     uid = str(update.effective_user.id)
 
-    lang = detect_lang(text)
+    if re.search(r'[؀-ۿ]', text):
+        lang = "ar"
+    elif len(text.split()) >= 3:
+        lang = "en"
+    else:
+        lang = get_user_lang(update.effective_user.id)
     set_user_lang(update.effective_user.id, lang)
 
     if 'awaiting_risk' in ctx.user_data:
@@ -4225,15 +4429,17 @@ async def on_text(update, ctx):
             await update.message.reply_text("⚠️ Send a valid number (100)" if lang=="en" else "⚠️ أرسل رقماً صحيحاً (مثال: 100)")
         return
 
-    touch_user(update.effective_user)
+    st, ok = await gate(update)
+    if not ok: return
     sym = clean_symbol(text.split()[0])
     if not sym:
         await update.message.reply_text(t("invalid_symbol", lang)); return
+    if sym in EXCLUDE_TICKERS:
+        await update.message.reply_text(t("not_supported", lang)); return
 
     wait = await update.message.reply_text(t("analyzing", lang, sym=sym))
     try:
         res = await asyncio.to_thread(get_analysis, sym)
-        st, _ = user_status(update.effective_user.id, store.data["users"].get(uid, {}))
         tier = "admin" if st=="admin" else ("vip" if st=="vip" else "free")
 
         kb = keyboard(sym, res["tf"], tier, "binance_fut")
@@ -4246,7 +4452,7 @@ async def on_text(update, ctx):
             await send_admin_copy(update.message, res)
 
         cur_pts = store.data["users"].get(uid, {}).get("points", 0)
-        bot_un = ctx.application.bot_data.get("username", "")
+        bot_un = ctx.bot_data.get("username", "")
         await send_points_flash(update.message, cur_pts, update.effective_user.id, bot_un)
 
     except PairNotFound:
