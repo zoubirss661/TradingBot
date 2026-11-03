@@ -516,13 +516,11 @@ async def send_points_flash(msg_obj, pts, uid, bot_username=None):
     except Exception as e:
         log.warning(f"send_points_flash: {e}")
 
- def binance_futures_klines(sym, tf, bars=500):
+def binance_futures_klines(sym, tf, bars=500):
     interval = BINANCE_INTERVAL_MAP.get(tf)
     if not interval: return None
-    
-    # 1. المحاولة الأولى: الرابط الأصلي المباشر (الذي كان يعمل سابقاً)
     try:
-        r = requests.get(f"https://fapi.binance.com/fapi/v1/klines",
+        r = requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/klines",
                          params={"symbol": f"{sym}USDT", "interval": interval, "limit": min(bars,1500)},
                          timeout=10)
         if r.status_code == 200:
@@ -530,42 +528,17 @@ async def send_points_flash(msg_obj, pts, uid, bot_username=None):
             if isinstance(data, list) and data:
                 return [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in data]
     except Exception: pass
-
-    # 2. المحاولة الثانية: مكتبة ccxt (في حال فشل الرابط المباشر)
-    try:
-        ex = get_ex("binance")
-        with _ex_lock["binance"]:
-            data = ex.fetch_ohlcv(f"{sym}/USDT", tf, limit=min(bars,1500))
-            if data:
-                return [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in data]
-    except Exception: pass
-
     return None
-
 def binance_futures_ticker(sym):
-    # 1. المحاولة الأولى: الرابط المباشر
     try:
-        r = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/24hr", params={"symbol": f"{sym}USDT"}, timeout=10)
+        r = requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/ticker/24hr", params={"symbol": f"{sym}USDT"}, timeout=10)
         if r.status_code == 200:
             d = r.json()
             return {"last": float(d.get("lastPrice", 0)), "percentage": float(d.get("priceChangePercent", 0)),
                     "quoteVolume": float(d.get("quoteVolume", 0)), "high": float(d.get("highPrice", 0)),
                     "low": float(d.get("lowPrice", 0))}
     except Exception: pass
-
-    # 2. المحاولة الثانية: ccxt
-    try:
-        ex = get_ex("binance")
-        with _ex_lock["binance"]:
-            t = ex.fetch_ticker(f"{sym}/USDT")
-            if t and float(t.get("last", 0)) > 0:
-                return {"last": float(t.get("last", 0)), "percentage": float(t.get("percentage", 0)),
-                        "quoteVolume": float(t.get("quoteVolume", 0)), "high": float(t.get("high", 0)),
-                        "low": float(t.get("low", 0))}
-    except Exception: pass
-
     return None
-
 def binance_futures_all_tickers():
     try:
         r = requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/ticker/24hr", timeout=15)
