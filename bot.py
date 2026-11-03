@@ -516,28 +516,32 @@ async def send_points_flash(msg_obj, pts, uid, bot_username=None):
     except Exception as e:
         log.warning(f"send_points_flash: {e}")
 
-def binance_futures_klines(sym, tf, bars=500):
+ def binance_futures_klines(sym, tf, bars=500):
     interval = BINANCE_INTERVAL_MAP.get(tf)
     if not interval: return None
     try:
-        r = requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/klines",
-                         params={"symbol": f"{sym}USDT", "interval": interval, "limit": min(bars,1500)},
-                         timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list) and data:
+        # استخدام ccxt بدلاً من requests لتجاوز حظر السيرفر
+        ex = get_ex("binance")
+        with _ex_lock["binance"]:
+            data = ex.fetch_ohlcv(f"{sym}/USDT", tf, limit=min(bars,1500))
+            if data:
                 return [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in data]
-    except Exception: pass
+    except Exception as e:
+        log.warning(f"ccxt binance klines failed: {e}")
+        pass
     return None
-def binance_futures_ticker(sym):
+ def binance_futures_ticker(sym):
     try:
-        r = requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/ticker/24hr", params={"symbol": f"{sym}USDT"}, timeout=10)
-        if r.status_code == 200:
-            d = r.json()
-            return {"last": float(d.get("lastPrice", 0)), "percentage": float(d.get("priceChangePercent", 0)),
-                    "quoteVolume": float(d.get("quoteVolume", 0)), "high": float(d.get("highPrice", 0)),
-                    "low": float(d.get("lowPrice", 0))}
-    except Exception: pass
+        ex = get_ex("binance")
+        with _ex_lock["binance"]:
+            t = ex.fetch_ticker(f"{sym}/USDT")
+            if t and float(t.get("last", 0)) > 0:
+                return {"last": float(t.get("last", 0)), "percentage": float(t.get("percentage", 0)),
+                        "quoteVolume": float(t.get("quoteVolume", 0)), "high": float(t.get("high", 0)),
+                        "low": float(t.get("low", 0))}
+    except Exception as e:
+        log.warning(f"ccxt binance ticker failed: {e}")
+        pass
     return None
 def binance_futures_all_tickers():
     try:
