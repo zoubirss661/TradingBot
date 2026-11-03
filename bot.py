@@ -35,7 +35,7 @@ def _chat(v):
 BOT_TOKEN = _e("BOT_TOKEN")
 CHANNEL_ID = _chat(_e("CHANNEL_ID"))
 VIP_CHANNEL_ID = _chat(_e("VIP_CHANNEL_ID"))
-ADMIN_ID = _int("ADMIN_ID", 0)  # ✅ لا افتراضي مكشوف
+ADMIN_ID = _int("ADMIN_ID", 0)  
 GIST_ID = _e("GIST_ID")
 GITHUB_TOKEN = _e("GITHUB_TOKEN")
 WHALE_ALERT_KEY = _e("WHALE_ALERT_KEY")
@@ -118,7 +118,7 @@ BINANCE_INTERVAL_MAP = {"15m":"15m","1h":"1h","4h":"4h","1d":"1d"}
 
 MAJORS = {"BTC","ETH","BNB","SOL","XRP","ADA","DOGE","AVAX","LINK","DOT","LTC","TRX"}
 CORE_COINS = ["BTC","ETH","BNB","XRP","ADA","DOGE","AVAX","LTC","NEAR","SUI","ATOM","TRX","BONK","OP"]
-MEME_COINS = ["TIA","FLOKI","INJ"]  # ✅ SOL/DOT أُزيلتا
+MEME_COINS = ["TIA","FLOKI","INJ"] 
 ALPHA_COINS = ["ETH","BNB","SOL","SUI","NEAR","INJ","TIA","FLOKI","APT","ARB"]
 COINS = CORE_COINS + MEME_COINS
 WEAK_COINS = set()
@@ -1661,7 +1661,6 @@ def golden_score(sym,debug=False,relaxed=False):
     try:
         res=get_analysis(sym)
         if not res: return None
-        # ✅ إصلاح: احترام relaxed فعلياً
         if not relaxed:
             if res["grade"] not in ("A+","A"):
                 if debug: return dict(sym=sym,score=0,reasons=[f"الدرجة {res['grade']} غير كافية"])
@@ -1835,7 +1834,7 @@ async def notify_free(bot,text):
         try:
             await bot.send_message(CHANNEL_ID,text,parse_mode=ParseMode.HTML,
                                    protect_content=PROTECT,link_preview_options=NO_PREVIEW)
-                 except Exception as e: log.warning(f"notify_free: {str(e)[:80]}")
+        except Exception as e: log.warning(f"notify_free: {str(e)[:80]}")
 
 def _new_fig(w=12,h=8,bg="#ffffff"):
     fig=Figure(figsize=(w,h),facecolor=bg,dpi=200)
@@ -1899,7 +1898,6 @@ def render_chart(res,tier="free",published=False):
     for name,px,col,ls in levels: ax.axhline(px,color=col,lw=1.7,ls=ls,zorder=3)
     lo=min([float(df["low"].min())]+[v[1] for v in levels])
     hi=max([float(df["high"].max())]+[v[1] for v in levels])
-    # ✅ إصلاح: حماية من hi==lo
     if hi<=lo: hi=lo+1e-6
     pad=(hi-lo)*0.06
     ylo,yhi=lo-pad,hi+pad
@@ -1976,7 +1974,6 @@ def render_trade_card(res,tier="free"):
     accent="#00ff9c" if is_long else "#ff4d6d"
     entry,sl=lv["entry"],lv["sl"]; tps=lv["tps"]
     risk=abs(entry-sl)
-    # ✅ إصلاح: حماية من ZeroDivisionError
     rr=abs(tps[0]["px"]-entry)/risk if (risk>0 and tps) else 0.0
     fig=_new_fig(12,7.2,"#050a10")
     ax=fig.add_axes([0,0,1,1]); ax.set_xlim(0,1); ax.set_ylim(0,1); ax.axis("off")
@@ -2416,7 +2413,6 @@ async def cross_loop(app):
     await asyncio.sleep(300); _cross_posted={}
     while True:
         try:
-            # ✅ إصلاح: تنظيف دوري للذاكرة
             if len(_cross_posted)>2000:
                 cutoff=now_s()-7*DAY
                 _cross_posted={k:v for k,v in _cross_posted.items() if v>cutoff}
@@ -2551,7 +2547,6 @@ async def golden_loop(app):
     await asyncio.sleep(600); _golden_posted={}
     while True:
         try:
-            # ✅ إصلاح: تنظيف دوري
             if len(_golden_posted)>500:
                 cutoff=time.time()-14*DAY
                 _golden_posted={k:v for k,v in _golden_posted.items() if v>cutoff}
@@ -2583,11 +2578,11 @@ async def whale_hunter_loop(app):
                     with _ex_lock["binance"]: trades=ex.fetch_trades(f"{s}/USDT",limit=50)
                     for tr in trades:
                         notional=float(tr.get("price",0))*float(tr.get("amount",0))
-                        if notional>=50000:
+                        # ✨ تم التعديل هنا: من 50,000 إلى 10,000
+                        if notional >= 10000:
                             trade_id=f"{s}_{tr.get('id')}"
                             if trade_id in _seen_whales: continue
                             _seen_whales.add(trade_id)
-                            # ✅ إصلاح: لا نحذف الكل بل الأقدم
                             if len(_seen_whales)>2000:
                                 _seen_whales=set(list(_seen_whales)[-1000:])
                             side=tr.get("side","buy"); price=float(tr.get("price",0))
@@ -2666,7 +2661,6 @@ def simulate(df,sym,tf,start=210):
             trade_step(p,o[j],h[j],l[j],c[j],atr[j])
             if p["state"] in ("closed","expired"): break
             j+=1
-        # ✅ إصلاح: تمرير ev + تعيين R
         if p["state"]=="open":
             ev=[]; close_at(p,float(c[n-1]),"TIME",ev); j=n-1
         if p["state"]=="closed" and p.get("R") is not None:
@@ -3904,7 +3898,6 @@ async def on_error(update,ctx): log.error("err: %s",ctx.error,exc_info=ctx.error
 async def on_text(update,ctx):
     if not update.message or not update.message.text: return
     text=update.message.text.strip(); uid=str(update.effective_user.id)
-    # ✅ إصلاح: تهيئة ctx.user_data إن لم تكن موجودة
     if ctx.user_data is None: ctx.user_data={}
     if re.search(r'[؀-ۿ]',text): lang="ar"
     elif len(text.split())>=3: lang="en"
