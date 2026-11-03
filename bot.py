@@ -2133,7 +2133,6 @@ def _x_index(t_arr, t_ms):
     return float(np.clip(np.searchsorted(t_arr, t_ms), 0, len(t_arr) - 1))
 
 def render_chart(res, tier="free", published=False):
-    # شارت التحليل: خط سعر + EMA20/50 + Bollinger + RSI، مع الدخول والوقف والأهداف مكتوبة بالأرقام
     df = res["df"].tail(CHART_BARS).reset_index(drop=True)
     lv, side, sym, tf = res["lv"], res["side"], res["sym"], res["tf"]
     n = len(df); x = np.arange(n)
@@ -2182,7 +2181,6 @@ def render_chart(res, tier="free", published=False):
     return _to_png(fig)
 
 def render_pattern_chart(res, tier="free"):
-    # شارت النماذج: شموع داكنة + خطوط النماذج من نقاط القمم والقيعان الفعلية + مستويات الصفقة
     df = res["df"].tail(CHART_BARS).reset_index(drop=True)
     lv, side, sym, tf = res["lv"], res["side"], res["sym"], res["tf"]
     n = len(df); t_arr = df["t"].values.astype("int64")
@@ -2235,7 +2233,6 @@ def render_pattern_chart(res, tier="free"):
     return _to_png(fig)
 
 def render_trade_card(res, tier="free"):
-    # بطاقة الصفقة: خلفية داكنة متدرجة، أرقام نيون، صناديق ملونة، بنفس روح بطاقة صانع السوق
     lv, side, sym, tf = res["lv"], res["side"], res["sym"], res["tf"]
     grade = res.get("grade", "?")
     is_long = side == 1
@@ -4770,4 +4767,4 @@ def main():
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    main()
+    main() 
