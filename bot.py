@@ -516,11 +516,10 @@ async def send_points_flash(msg_obj, pts, uid, bot_username=None):
     except Exception as e:
         log.warning(f"send_points_flash: {e}")
 
- def binance_futures_klines(sym, tf, bars=500):
+def binance_futures_klines(sym, tf, bars=500):
     interval = BINANCE_INTERVAL_MAP.get(tf)
     if not interval: return None
     try:
-        # استخدام ccxt بدلاً من requests لتجاوز حظر السيرفر
         ex = get_ex("binance")
         with _ex_lock["binance"]:
             data = ex.fetch_ohlcv(f"{sym}/USDT", tf, limit=min(bars,1500))
@@ -530,7 +529,8 @@ async def send_points_flash(msg_obj, pts, uid, bot_username=None):
         log.warning(f"ccxt binance klines failed: {e}")
         pass
     return None
- def binance_futures_ticker(sym):
+
+def binance_futures_ticker(sym):
     try:
         ex = get_ex("binance")
         with _ex_lock["binance"]:
@@ -543,6 +543,7 @@ async def send_points_flash(msg_obj, pts, uid, bot_username=None):
         log.warning(f"ccxt binance ticker failed: {e}")
         pass
     return None
+
 def binance_futures_all_tickers():
     try:
         r = requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/ticker/24hr", timeout=15)
