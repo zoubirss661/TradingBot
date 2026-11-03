@@ -2,7 +2,9 @@ import os, io, re, json, time, asyncio, logging, threading, functools
 import datetime as dt
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np, pandas as pd, requests, ccxt, matplotlib
-import urllib.parse, concurrent.futures
+import urllib.parse
+import concurrent.futures
+
 matplotlib.use("Agg")
 matplotlib.rcParams["font.family"] = ["DejaVu Sans", "Noto Naskh Arabic", "Amiri", "sans-serif"]
 import matplotlib.pyplot as plt
@@ -11,6 +13,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.patches import FancyBboxPatch, Rectangle
 import matplotlib.patheffects as pe
 from matplotlib.colors import LinearSegmentedColormap
+
 try:
     import arabic_reshaper
     from bidi.algorithm import get_display
@@ -35,7 +38,7 @@ def _chat(v):
 BOT_TOKEN = _e("BOT_TOKEN")
 CHANNEL_ID = _chat(_e("CHANNEL_ID"))
 VIP_CHANNEL_ID = _chat(_e("VIP_CHANNEL_ID"))
-ADMIN_ID = _int("ADMIN_ID", 0)  
+ADMIN_ID = _int("ADMIN_ID", 0)
 GIST_ID = _e("GIST_ID")
 GITHUB_TOKEN = _e("GITHUB_TOKEN")
 WHALE_ALERT_KEY = _e("WHALE_ALERT_KEY")
@@ -2578,8 +2581,8 @@ async def whale_hunter_loop(app):
                     with _ex_lock["binance"]: trades=ex.fetch_trades(f"{s}/USDT",limit=50)
                     for tr in trades:
                         notional=float(tr.get("price",0))*float(tr.get("amount",0))
-                        # ✨ تم التعديل هنا: من 50,000 إلى 10,000
-                        if notional >= 50000:
+                        # ✅ تعديل الحد إلى 15,000
+                        if notional >= 155000:
                             trade_id=f"{s}_{tr.get('id')}"
                             if trade_id in _seen_whales: continue
                             _seen_whales.add(trade_id)
