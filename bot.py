@@ -2579,7 +2579,7 @@ async def whale_hunter_loop(app):
                     for tr in trades:
                         notional=float(tr.get("price",0))*float(tr.get("amount",0))
                         # ✨ تم التعديل هنا: من 50,000 إلى 10,000
-                        if notional >= 15000:
+                        if notional >= 50000:
                             trade_id=f"{s}_{tr.get('id')}"
                             if trade_id in _seen_whales: continue
                             _seen_whales.add(trade_id)
