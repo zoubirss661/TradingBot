@@ -1835,8 +1835,9 @@ async def notify_free(bot,text):
         try:
             await bot.send_message(CHANNEL_ID,text,parse_mode=ParseMode.HTML,
                                    protect_content=PROTECT,link_preview_options=NO_PREVIEW)
-        except Exception as e: log.warning(f"notify_free: {str(e)[:80]}")
-            def _new_fig(w=12,h=8,bg="#ffffff"):
+                 except Exception as e: log.warning(f"notify_free: {str(e)[:80]}")
+
+def _new_fig(w=12,h=8,bg="#ffffff"):
     fig=Figure(figsize=(w,h),facecolor=bg,dpi=200)
     FigureCanvasAgg(fig); return fig
 def _to_png(fig):
