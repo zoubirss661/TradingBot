@@ -118,7 +118,7 @@ def coin_link(sym, source="binance_fut"):
 FAST_EXCHANGES = ["okx", "bybit", "gateio", "mexc", "kucoin", "bitget", "htx", "binance"]
 EXCHANGES = ["okx", "bybit", "gateio", "mexc", "kucoin", "bitget", "htx", "binance", "bingx", "lbank", "bitmart", "poloniex"]
 
-BINANCE_FAPI_BASE = "https://fapi.binance.com"
+BINANCE_FAPI_BASE = "https://data-api.binance.vision"
 BINANCE_SPOT_MIRRORS = ["https://data-api.binance.vision", "https://api1.binance.com", "https://api2.binance.com", "https://api3.binance.com"]
 BINANCE_INTERVAL_MAP = {"15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
 
