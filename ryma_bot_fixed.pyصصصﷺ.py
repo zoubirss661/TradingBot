@@ -59,7 +59,9 @@ def _btn(text, style=None, **kw):
     if style: kw["api_kwargs"] = {"style": style}
     return InlineKeyboardButton(text, **kw)
 
-EXCLUDE_TICKERS = {"MU","SPCX","SNXX","SOXS","CL","TSLA","AAPL","NVDA","META","GOOG","AMZN","MSFT","NFLX","AMD","INTC","BABA","COIN","MSTR","GME","AMC"}
+# ✅ تمت إضافة الأسهم المرمزة لمنع فشل التحليل
+EXCLUDE_TICKERS = {"MU","SPCX","SNXX","SOXS","CL","TSLA","AAPL","NVDA","META","GOOG","AMZN","MSFT","NFLX","AMD","INTC","BABA","COIN","MSTR","GME","AMC",
+                   "SOXL","XAU","SNDK","SKHYNIX","KORU","XAG","SLV","GLD","QQQ","SPY","TQQQ","SQQQ","UVXY","VIXY","YINN","YANG","NIO","PLTR","SMCI"}
 
 REFERRAL_LINKS = {
     "binance": ("Binance","https://www.binance.com/register?ref=WELCOMBAKC"),
@@ -1092,6 +1094,7 @@ def compute_core_levels(df, i, side, price=None):
         if len(targets) < 2:
             targets = [entry + side * atr * m for m in [1.5, 3.0, 4.5, 6.0]]
         targets = targets[:4]
+        if not targets: return None
         lookback_df = df.tail(20)
         swing = float(lookback_df["low"].min()) if side==1 else float(lookback_df["high"].max())
         sl_raw = swing - 0.1*atr if side==1 else swing + 0.1*atr
@@ -1731,11 +1734,11 @@ def golden_score(sym,debug=False,relaxed=False):
         log.error(f"golden_score err {sym}: {e}")
         return None
 
+# ✅ تمت إزالة time.sleep(0.15) — لا بطء متعمد
 def _run_golden_scan(syms,max_results,progress_cb,relaxed=False):
     results=[]; total=len(syms)
     def scan_one(sym):
         try:
-            time.sleep(0.15)
             return golden_score(sym,debug=False,relaxed=relaxed)
         except Exception: return None
     processed=0
@@ -1804,7 +1807,6 @@ def build_whale_tweet(sym,side,notional,price):
     share_url=f"https://twitter.com/intent/tweet?text={urllib.parse.quote(text)}"
     return text,share_url
 
-# ✅ منشور Binance Square: إنجليزي + 3 هاشتاغات + بدون تحذير مالي
 def build_social_text(res,platform="binance"):
     side=res["side"]; lv=res["lv"]; sym=res["sym"]
     side_word="LONG 🟢" if side==1 else "SHORT 🔴"
@@ -2352,7 +2354,7 @@ async def run_autopost(bot):
     if _free_day["d"]!=today: _free_day.update(d=today,n=0)
     a_candidates=[r for r in cands if r["grade"] in ("A+","A")]
     a_candidates.sort(key=lambda r:(-r.get("fut_score",0),-r["rank"]))
-    b_candidates=[r for r in cands if r["grade"]=="B"]   # public channels never get C
+    b_candidates=[r for r in cands if r["grade"]=="B"]
     vip_pool=a_candidates if a_candidates else b_candidates
     if len(active_signals())>=MAX_OPEN:
         log.warning(f"MAX_OPEN {len(active_signals())}/{MAX_OPEN}"); return dict(vip=0,free=0,total=0)
@@ -2660,7 +2662,6 @@ async def golden_loop(app):
         except Exception: log.exception("golden_loop")
         await asyncio.sleep(CYCLE_GOLDEN)
 
-# ✅ whale_hunter_loop — الحد الأدنى 15,000 دولار
 async def whale_hunter_loop(app):
     await asyncio.sleep(60)
     log.info("whale_hunter_loop: بدء مراقبة الحيتان")
@@ -2674,7 +2675,6 @@ async def whale_hunter_loop(app):
                     with _ex_lock["binance"]: trades=ex.fetch_trades(f"{s}/USDT",limit=50)
                     for tr in trades:
                         notional=float(tr.get("price",0))*float(tr.get("amount",0))
-                        # ✅ الحد الأدنى لتنبيهات الحيتان: 15,000 دولار
                         if notional >= 15000:
                             trade_id=f"{s}_{tr.get('id')}"
                             if trade_id in _seen_whales: continue
@@ -2726,7 +2726,6 @@ def build_weekly_report():
              "⚠️ الأرقام من الصفقات المسجلة فعلياً فقط، ونتائج الماضي لا تضمن المستقبل.",
              RISK_WARNING]
     return "\n".join(lines)
-
 async def weekly_report_loop(app):
     await asyncio.sleep(900)
     while True:
@@ -4064,6 +4063,7 @@ def whale_alert_recent(min_usd=1_000_000,minutes=60):
 
 async def on_error(update,ctx): log.error("err: %s",ctx.error,exc_info=ctx.error)
 
+# ✅ الإصلاح الجوهري: gate() أولاً، ثم awaiting_risk/awaiting_port
 async def on_text(update,ctx):
     if not update.message or not update.message.text: return
     text=update.message.text.strip(); uid=str(update.effective_user.id)
@@ -4123,6 +4123,7 @@ async def on_text(update,ctx):
         tier="admin" if st=="admin" else ("vip" if st=="vip" else "free")
         kb=keyboard(sym,res["tf"],tier,"binance_fut")
         img=await asyncio.to_thread(render_chart,res,tier)
+        # ✅ render_trade_card للأدمن فقط (لتفادي الفشل الصامت لغير الأدمن)
         if tier=="admin":
             card=await asyncio.to_thread(render_trade_card,res,tier)
             await update.message.reply_photo(photo=card,reply_markup=kb)
@@ -4173,7 +4174,7 @@ async def post_init(app):
         asyncio.create_task(whale_hunter_loop(app)),
         asyncio.create_task(weekly_report_loop(app)),asyncio.create_task(trial_notice_loop(app)),
         asyncio.create_task(morning_brief_loop(app))]
-    log.info("ryma v106 | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$15000",
+    log.info("ryma v107-fixed | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$15000 | no_golden_sleep",
              MAX_OPEN,CYCLE_GOLDEN,get_golden_config().get("min_score",1),is_multi_exchange(),
              VIP_THRESHOLD,VIP_REWARD_DAYS)
 
