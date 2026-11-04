@@ -59,7 +59,9 @@ def _btn(text, style=None, **kw):
     if style: kw["api_kwargs"] = {"style": style}
     return InlineKeyboardButton(text, **kw)
 
-EXCLUDE_TICKERS = {"MU","SPCX","SNXX","SOXS","CL","TSLA","AAPL","NVDA","META","GOOG","AMZN","MSFT","NFLX","AMD","INTC","BABA","COIN","MSTR","GME","AMC"}
+# ✅ الأسهم المرمزة مستبعدة من البداية
+EXCLUDE_TICKERS = {"MU","SPCX","SNXX","SOXS","CL","TSLA","AAPL","NVDA","META","GOOG","AMZN","MSFT","NFLX","AMD","INTC","BABA","COIN","MSTR","GME","AMC",
+                   "SOXL","XAU","SNDK","SKHYNIX","KORU","XAG","SLV","GLD","QQQ","SPY","TQQQ","SQQQ","UVXY","VIXY","YINN","YANG","NIO","PLTR","SMCI"}
 
 REFERRAL_LINKS = {
     "binance": ("Binance","https://www.binance.com/register?ref=WELCOMBAKC"),
@@ -131,7 +133,7 @@ TRIAL_DAYS = 7; VIP_FORCE_DAY = 13
 FEE, SLIP = 0.0008, 0.0005
 TF_MS = {"15m":900_000,"1h":3_600_000,"4h":14_400_000,"1d":86_400_000}
 CANDLE_TTL, PRICE_TTL = 240, 60
-MIN_BARS = 215; CHART_BARS = 90; SCAN_WORKERS = 8; MAX_OPEN = 100
+MIN_BARS = 215; CHART_BARS = 90; SCAN_WORKERS = 4; MAX_OPEN = 100
 VIP_POSTS_PER_CYCLE = 5; FREE_POSTS_PER_CYCLE = 10; FREE_MAX_PER_DAY = 40
 CYCLE_AUTOPOST=12600; CYCLE_SHORT_FREE=14400; CYCLE_MARKET_SUMMARY=16200
 CYCLE_PREDICT=14400; CYCLE_ALPHA_SUMMARY=14400; CYCLE_BOTTOMS_AUTO=21600
@@ -287,7 +289,10 @@ def get_golden_config():
         cfg=store.data.setdefault("settings",{}).get("golden_config")
         if not cfg or not isinstance(cfg,dict):
             cfg=dict(DEFAULT_GOLDEN_CONFIG); store.data["settings"]["golden_config"]=cfg; store.save("settings")
-        merged=dict(DEFAULT_GOLDEN_CONFIG); merged.update(cfg); return merged
+        merged=dict(DEFAULT_GOLDEN_CONFIG); merged.update(cfg)
+        if merged.get("min_score",1)>6:
+            merged["min_score"]=3; cfg["min_score"]=3; store.save("settings")
+        return merged
 def set_golden_config(key,value):
     with store.lock:
         cfg=store.data.setdefault("settings",{}).setdefault("golden_config",dict(DEFAULT_GOLDEN_CONFIG))
@@ -376,36 +381,68 @@ async def send_points_flash(msg_obj,pts,uid,bot_username=None):
         except Exception as _ex: log.debug('ignored: %s', _ex)
     except Exception as e: log.warning(f"send_points_flash: {e}")
 
+# ✅ Rate limiter محمي ضد 429/418
+_bn_lock=threading.Lock(); _bn_hist=[]; _bn_ban=[0.0]; _bn_last_err=["—"]
+BN_BUDGET=1500
+
+def _bn_get(path,params=None,weight=5,timeout=10):
+    waited=0.0
+    while True:
+        now=time.time()
+        if _bn_ban[0]>now:
+            _bn_last_err[0]=f"banned {int(_bn_ban[0]-now)}s"; return None
+        with _bn_lock:
+            while _bn_hist and _bn_hist[0][0]<now-60: _bn_hist.pop(0)
+            used=sum(w for _,w in _bn_hist)
+            if used+weight<=BN_BUDGET:
+                _bn_hist.append((now,weight)); break
+            wait=_bn_hist[0][0]+60-now if _bn_hist else 1
+        if waited>25:
+            _bn_last_err[0]="rate budget exhausted"; return None
+        step=min(max(wait,0.3),3.0); time.sleep(step); waited+=step
+    try:
+        r=requests.get(f"{BINANCE_FAPI_BASE}{path}",params=params,timeout=timeout)
+    except Exception as e:
+        _bn_last_err[0]=f"net {type(e).__name__}"; log.warning("fapi %s net error: %s",path,str(e)[:80]); return None
+    if r.status_code in (418,429):
+        ra=int(r.headers.get("Retry-After","60") or 60)
+        _bn_ban[0]=time.time()+min(max(ra,10),600)
+        _bn_last_err[0]=f"HTTP {r.status_code}"
+        log.warning("fapi %s -> %s (Retry-After %ss) — pause",path,r.status_code,ra); return None
+    if r.status_code!=200:
+        _bn_last_err[0]=f"HTTP {r.status_code}"
+        log.warning("fapi %s -> %s %s",path,r.status_code,r.text[:100]); return None
+    try: return r.json()
+    except Exception: return None
+
 def binance_futures_klines(sym,tf,bars=500):
     interval=BINANCE_INTERVAL_MAP.get(tf)
     if not interval: return None
     try:
-        r=requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/klines",
-                       params={"symbol":f"{sym}USDT","interval":interval,"limit":min(bars,1500)},timeout=10)
-        if r.status_code==200:
-            data=r.json()
-            if isinstance(data,list) and data:
-                return [[int(k[0]),float(k[1]),float(k[2]),float(k[3]),float(k[4]),float(k[5])] for k in data]
+        lim=min(bars,1500); w=5 if lim<=500 else (10 if lim<=1000 else 20)
+        data=_bn_get("/fapi/v1/klines",{"symbol":f"{sym}USDT","interval":interval,"limit":lim},weight=w)
+        if isinstance(data,list) and data:
+            return [[int(k[0]),float(k[1]),float(k[2]),float(k[3]),float(k[4]),float(k[5])] for k in data]
     except Exception as _ex: log.debug('ignored: %s', _ex)
     return None
 
 def binance_futures_ticker(sym):
     try:
-        r=requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/ticker/24hr",params={"symbol":f"{sym}USDT"},timeout=10)
-        if r.status_code==200:
-            d=r.json()
+        d=_bn_get("/fapi/v1/ticker/24hr",{"symbol":f"{sym}USDT"},weight=1)
+        if isinstance(d,dict) and d:
             return {"last":float(d.get("lastPrice",0)),"percentage":float(d.get("priceChangePercent",0)),
                     "quoteVolume":float(d.get("quoteVolume",0)),"high":float(d.get("highPrice",0)),
                     "low":float(d.get("lowPrice",0))}
     except Exception as _ex: log.debug('ignored: %s', _ex)
     return None
 
+_all_tk_cache=[0,[]]
 def binance_futures_all_tickers():
     try:
-        r=requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/ticker/24hr",timeout=15)
-        if r.status_code!=200: return None
-        data=r.json()
-        if not isinstance(data,list): return None
+        now=time.time()
+        if _all_tk_cache[1] and now-_all_tk_cache[0]<60: return _all_tk_cache[1]
+        data=_bn_get("/fapi/v1/ticker/24hr",None,weight=40,timeout=15)
+        if not isinstance(data,list): return _all_tk_cache[1] or None
         rows=[]
         for t in data:
             try:
@@ -419,6 +456,7 @@ def binance_futures_all_tickers():
                 if price<=0: continue
                 rows.append({"symbol":base_sym,"change":ch,"price":price,"volume":qv})
             except Exception: continue
+        if rows: _all_tk_cache[0]=now; _all_tk_cache[1]=rows
         return rows
     except Exception: return None
 
@@ -482,9 +520,18 @@ def _fetch_exchange(name,sym,tf,bars):
 _candle_cache={}
 def get_candles(sym,tf,bars=450,ttl=CANDLE_TTL,min_bars=MIN_BARS,binance_only=False):
     key=(sym,tf,bars,min_bars,binance_only)
-    if len(_candle_cache)>400: _candle_cache.clear()
+    if len(_candle_cache)>600:
+        for k_ in sorted(_candle_cache,key=lambda z:_candle_cache[z][0])[:200]: _candle_cache.pop(k_,None)
     hit=_candle_cache.get(key)
     if hit and time.time()-hit[0]<ttl: return hit[1]
+    try:
+        return _get_candles_fresh(sym,tf,bars,min_bars,binance_only,key)
+    except (NoData,PairNotFound):
+        if hit and time.time()-hit[0]<6*3600:
+            log.warning("get_candles %s %s: استخدام بيانات مخزنة قديمة",sym,tf); return hit[1]
+        raise
+
+def _get_candles_fresh(sym,tf,bars,min_bars,binance_only,key):
     try:
         rows=binance_futures_klines(sym,tf,bars)
         if rows and len(rows)>=min_bars:
@@ -501,9 +548,11 @@ def get_candles(sym,tf,bars=450,ttl=CANDLE_TTL,min_bars=MIN_BARS,binance_only=Fa
                 df.attrs.update(source="binance",degraded=False)
                 _candle_cache[key]=(time.time(),df); return df
     except Exception as _ex: log.debug('ignored: %s', _ex)
-    if binance_only: raise NoData(sym)
+    if binance_only:
+        log.warning("get_candles %s %s: binance فقط وفشل | %s",sym,tf,_bn_last_err[0]); raise NoData(sym)
     multi=is_multi_exchange()
-    if not multi: raise NoData(sym)
+    if not multi:
+        log.warning("get_candles %s %s: Binance فشل وتعدد المنصات معطّل | %s",sym,tf,_bn_last_err[0]); raise NoData(sym)
     bad,tried,best=0,0,None
     for name in EXCHANGES:
         if name=="binance": continue
@@ -511,8 +560,8 @@ def get_candles(sym,tf,bars=450,ttl=CANDLE_TTL,min_bars=MIN_BARS,binance_only=Fa
         tried+=1
         try: rows=_fetch_exchange(name,sym,tf,bars)
         except ccxt.BadSymbol: bad+=1; continue
-        except ccxt.NetworkError: _down[name]=time.time()+120; continue
-        except Exception: continue
+        except ccxt.NetworkError as e_: _down[name]=time.time()+120; log.warning("ccxt %s net: %s",name,str(e_)[:80]); continue
+        except Exception as e_: log.warning("ccxt %s %s: %s",name,sym,str(e_)[:80]); continue
         if not rows: continue
         df=_rows_to_df(rows,tf,bars)
         if len(df)>=min_bars:
@@ -522,6 +571,7 @@ def get_candles(sym,tf,bars=450,ttl=CANDLE_TTL,min_bars=MIN_BARS,binance_only=Fa
             df.attrs.update(source=name,degraded=True); best=df
     if best is not None:
         _candle_cache[key]=(time.time(),best); return best
+    log.warning("get_candles %s %s: فشلت كل المصادر (tried=%d bad=%d) | binance: %s",sym,tf,tried,bad,_bn_last_err[0])
     if tried>0 and bad==tried: raise PairNotFound(sym)
     raise NoData(sym)
 
@@ -675,10 +725,10 @@ def futures_long_short_ratio(sym,period="4h",limit=10):
 
 def futures_taker_flow(sym,limit=500):
     try:
-        r=requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/aggTrades",params={"symbol":f"{sym}USDT","limit":limit},timeout=8)
-        if r.status_code!=200: return None
+        data=_bn_get("/fapi/v1/aggTrades",{"symbol":f"{sym}USDT","limit":limit},weight=20,timeout=8)
+        if not isinstance(data,list): return None
         buy=sell=0.0
-        for t in r.json():
+        for t in data:
             q=float(t.get("q",0))
             if t.get("m"): sell+=q
             else: buy+=q
@@ -689,10 +739,10 @@ def futures_taker_flow(sym,limit=500):
 
 def futures_liquidations(sym,limit=100):
     try:
-        r=requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/allForceOrders",params={"symbol":f"{sym}USDT","limit":limit},timeout=8)
-        if r.status_code!=200: return None
+        data=_bn_get("/fapi/v1/allForceOrders",{"symbol":f"{sym}USDT","limit":limit},weight=20,timeout=8)
+        if not isinstance(data,list): return None
         longs=shorts=0.0
-        for o in r.json():
+        for o in data:
             notional=float(o.get("price",0))*float(o.get("origQty",0))
             if o.get("side")=="SELL": longs+=notional
             else: shorts+=notional
@@ -1092,15 +1142,16 @@ def compute_core_levels(df, i, side, price=None):
         if len(targets) < 2:
             targets = [entry + side * atr * m for m in [1.5, 3.0, 4.5, 6.0]]
         targets = targets[:4]
+        if not targets: return None
         lookback_df = df.tail(20)
         swing = float(lookback_df["low"].min()) if side==1 else float(lookback_df["high"].max())
         sl_raw = swing - 0.1*atr if side==1 else swing + 0.1*atr
         dist_raw = abs(entry - sl_raw)
-        if dist_raw > entry*CORE_SL_MAX/100: return None
-        dist = max(dist_raw, entry*CORE_SL_MIN/100)
+        dist = min(max(dist_raw, entry*CORE_SL_MIN/100), entry*CORE_SL_MAX/100)
         sl = entry - side * dist; risk = abs(entry - sl)
         if risk <= 0: return None
-        if abs(targets[0] - entry) < risk * MIN_RR_TP1: return None
+        if abs(targets[0] - entry) < risk * MIN_RR_TP1:
+            targets = [entry + side * atr * m for m in [1.5, 3.0, 4.5, 6.0]]
         tps = []
         for idx, px in enumerate(targets):
             pct = 100 * side * (px - entry) / entry
@@ -1421,7 +1472,10 @@ def analyze(sym):
         try:
             df=get_candles(sym,try_tf,450); tf=try_tf; break
         except PairNotFound: raise
-        except NoData as e: last_err=e; continue
+        except NoData as e:
+            last_err=e
+            if try_tf==tf and _bn_ban[0]>time.time(): break
+            continue
     if df is None: raise last_err or NoData(sym)
     degraded=bool(df.attrs.get("degraded"))
     df=add_indicators(df,100); i=len(df)-1
@@ -1731,11 +1785,11 @@ def golden_score(sym,debug=False,relaxed=False):
         log.error(f"golden_score err {sym}: {e}")
         return None
 
+# ✅ سريع: لا sleep + max_workers=6
 def _run_golden_scan(syms,max_results,progress_cb,relaxed=False):
     results=[]; total=len(syms)
     def scan_one(sym):
         try:
-            time.sleep(0.15)
             return golden_score(sym,debug=False,relaxed=relaxed)
         except Exception: return None
     processed=0
@@ -1745,12 +1799,13 @@ def _run_golden_scan(syms,max_results,progress_cb,relaxed=False):
             processed+=1
             res=future.result()
             if res: results.append(res)
-            if progress_cb and processed%50==0:
+            if progress_cb and processed%10==0:
                 try: progress_cb(processed,total,len(results))
                 except Exception as _ex: log.debug('ignored: %s', _ex)
     results.sort(key=lambda x:-x["score"])
     return results[:max_results]
 
+# ✅ سريع: 300 عملة + 200 relaxed
 def golden_scan(max_results=2,progress_cb=None):
     try:
         rows=binance_futures_all_tickers()
@@ -2351,7 +2406,7 @@ async def run_autopost(bot):
     if _free_day["d"]!=today: _free_day.update(d=today,n=0)
     a_candidates=[r for r in cands if r["grade"] in ("A+","A")]
     a_candidates.sort(key=lambda r:(-r.get("fut_score",0),-r["rank"]))
-    b_candidates=[r for r in cands if r["grade"]=="B"]   # public channels never get C
+    b_candidates=[r for r in cands if r["grade"]=="B"]
     vip_pool=a_candidates if a_candidates else b_candidates
     if len(active_signals())>=MAX_OPEN:
         log.warning(f"MAX_OPEN {len(active_signals())}/{MAX_OPEN}"); return dict(vip=0,free=0,total=0)
@@ -2659,7 +2714,6 @@ async def golden_loop(app):
         except Exception: log.exception("golden_loop")
         await asyncio.sleep(CYCLE_GOLDEN)
 
-# ✅ whale_hunter_loop — الحد الأدنى 15,000 دولار
 async def whale_hunter_loop(app):
     await asyncio.sleep(60)
     log.info("whale_hunter_loop: بدء مراقبة الحيتان")
@@ -2673,7 +2727,6 @@ async def whale_hunter_loop(app):
                     with _ex_lock["binance"]: trades=ex.fetch_trades(f"{s}/USDT",limit=50)
                     for tr in trades:
                         notional=float(tr.get("price",0))*float(tr.get("amount",0))
-                        # ✅ الحد الأدنى لتنبيهات الحيتان: 15,000 دولار
                         if notional >= 15000:
                             trade_id=f"{s}_{tr.get('id')}"
                             if trade_id in _seen_whales: continue
@@ -2725,6 +2778,7 @@ def build_weekly_report():
              "⚠️ الأرقام من الصفقات المسجلة فعلياً فقط، ونتائج الماضي لا تضمن المستقبل.",
              RISK_WARNING]
     return "\n".join(lines)
+
 async def weekly_report_loop(app):
     await asyncio.sleep(900)
     while True:
@@ -2810,9 +2864,7 @@ def binance_futures_klines_long(sym, tf, bars):
         while len(out) < bars:
             params = {"symbol": f"{sym}USDT", "interval": interval, "limit": 1500}
             if end: params["endTime"] = end
-            r = requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/klines", params=params, timeout=10)
-            if r.status_code != 200: break
-            data = r.json()
+            data = _bn_get("/fapi/v1/klines", params, weight=20)
             if not isinstance(data, list) or not data: break
             out = [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in data] + out
             end = int(data[0][0]) - 1
@@ -3538,6 +3590,9 @@ async def cmd_debug(update,ctx):
         f"💎 Golden: كل {CYCLE_GOLDEN//3600}س | Min score: {get_golden_config().get('min_score',1)}",
         f"🕯️ Patterns: MTF (1D+4H+1H) ✅",
         f"🎯 Points: {VIP_THRESHOLD}=VIP{VIP_REWARD_DAYS}d | +{POINTS_REFERRAL}/referral"]
+    probe=await asyncio.to_thread(binance_futures_klines,"BTC","4h",300)
+    lines.append(f"🧪 Binance klines BTC: {'✅ '+str(len(probe))+' شمعة' if probe else '❌ '+_bn_last_err[0]}")
+    lines.append(f"⏱ ضغط الطلبات (آخر دقيقة): {sum(w for _,w in _bn_hist)}/{BN_BUDGET}")
     syms=await asyncio.to_thread(top_symbols,60); lines.append(f"🎯 top_symbols: {len(syms)}")
     if syms: lines.append(f"   {', '.join(syms[:10])}")
     g,l=await asyncio.to_thread(get_top_movers,True)
@@ -3765,7 +3820,7 @@ async def cb_handler(update,ctx):
             return
         if key=="min_score":
             cfg=get_golden_config(); current=cfg.get("min_score",1)
-            cycle={0:1,1:2,2:3,3:4,4:5,5:6,6:7,7:8,8:9,9:0}
+            cycle={0:1,1:2,2:3,3:4,4:5,5:6,6:0}
             set_golden_config("min_score",cycle.get(current,1))
             try: await q.message.edit_text(build_golden_config_text(),reply_markup=keyboard_golden_config(),parse_mode=ParseMode.HTML)
             except Exception as _ex: log.debug('ignored: %s', _ex)
@@ -4131,8 +4186,10 @@ async def on_text(update,ctx):
         cur_pts=store.data["users"].get(uid,{}).get("points",0)
         bot_un=ctx.application.bot_data.get("username","")
         await send_points_flash(update.message,cur_pts,update.effective_user.id,bot_un)
-    except PairNotFound: await update.message.reply_text(t("not_found",lang,sym=sym))
-    except NoData: await update.message.reply_text(t("no_data",lang))
+    except PairNotFound:
+        log.warning("PairNotFound %s",sym); await update.message.reply_text(t("not_found",lang,sym=sym))
+    except NoData as e:
+        log.warning("NoData %s: %r | binance: %s",sym,e,_bn_last_err[0]); await update.message.reply_text(t("no_data",lang))
     except Exception:
         log.exception("handle"); await update.message.reply_text(t("error",lang))
     finally:
@@ -4171,7 +4228,7 @@ async def post_init(app):
         asyncio.create_task(whale_hunter_loop(app)),
         asyncio.create_task(weekly_report_loop(app)),asyncio.create_task(trial_notice_loop(app)),
         asyncio.create_task(morning_brief_loop(app))]
-    log.info("ryma v106 | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$15000",
+    log.info("ryma v108 | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$15000 | fast_golden",
              MAX_OPEN,CYCLE_GOLDEN,get_golden_config().get("min_score",1),is_multi_exchange(),
              VIP_THRESHOLD,VIP_REWARD_DAYS)
 
@@ -4209,4 +4266,4 @@ def main():
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    main()
+    main() 
