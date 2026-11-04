@@ -59,9 +59,7 @@ def _btn(text, style=None, **kw):
     if style: kw["api_kwargs"] = {"style": style}
     return InlineKeyboardButton(text, **kw)
 
-# ✅ الأسهم المرمزة مستبعدة من البداية
-EXCLUDE_TICKERS = {"MU","SPCX","SNXX","SOXS","CL","TSLA","AAPL","NVDA","META","GOOG","AMZN","MSFT","NFLX","AMD","INTC","BABA","COIN","MSTR","GME","AMC",
-                   "SOXL","XAU","SNDK","SKHYNIX","KORU","XAG","SLV","GLD","QQQ","SPY","TQQQ","SQQQ","UVXY","VIXY","YINN","YANG","NIO","PLTR","SMCI"}
+EXCLUDE_TICKERS = {"MU","SPCX","SNXX","SOXS","CL","TSLA","AAPL","NVDA","META","GOOG","AMZN","MSFT","NFLX","AMD","INTC","BABA","COIN","MSTR","GME","AMC"}
 
 REFERRAL_LINKS = {
     "binance": ("Binance","https://www.binance.com/register?ref=WELCOMBAKC"),
@@ -129,15 +127,16 @@ STABLES = {"USDC","FDUSD","TUSD","USDT","DAI","BUSD","USDP","USDD","USDE","PYUSD
 POINTS_DAILY = 1; POINTS_PROMO = 5; POINTS_REFERRAL = 20
 VIP_THRESHOLD = 200; VIP_REWARD_DAYS = 1
 ALPHA_MAJORS_EXCLUDE = {"BTC","ETH","BNB","SOL","XRP","ADA","DOGE","AVAX","LINK","DOT","LTC","TRX","TON","SHIB","PEPE","USDC","FDUSD","TUSD","USDT","DAI","BUSD","USDP","USDD","USDE","PYUSD"}
-TRIAL_DAYS = 7; VIP_FORCE_DAY = 13
+TRIAL_DAYS = 7
+VIP_FORCE_DAY = 12 # 7 ايام تجربة + 5 ايام تنبيه = توقف في اليوم 13
 FEE, SLIP = 0.0008, 0.0005
 TF_MS = {"15m":900_000,"1h":3_600_000,"4h":14_400_000,"1d":86_400_000}
 CANDLE_TTL, PRICE_TTL = 240, 60
-MIN_BARS = 215; CHART_BARS = 90; SCAN_WORKERS = 4; MAX_OPEN = 100
+MIN_BARS = 215; CHART_BARS = 90; SCAN_WORKERS = 20; MAX_OPEN = 100
 VIP_POSTS_PER_CYCLE = 5; FREE_POSTS_PER_CYCLE = 10; FREE_MAX_PER_DAY = 40
 CYCLE_AUTOPOST=12600; CYCLE_SHORT_FREE=14400; CYCLE_MARKET_SUMMARY=16200
 CYCLE_PREDICT=14400; CYCLE_ALPHA_SUMMARY=14400; CYCLE_BOTTOMS_AUTO=21600
-CYCLE_GOLDEN=18000; CYCLE_PROMO=604800; CROSS_CHECK_INTERVAL=1800
+CYCLE_GOLDEN=18000; CYCLE_PROMO=604800; CROSS_CHECK_INTERVAL=3600
 SMART_PROFIT_DAYS=7; SMART_MAX_AGE_DAYS=14; SMART_FORCE_DAYS=3
 SMART_FILL_TRIGGER=0.8; CLEANUP_EVERY_CYCLES=12
 PIVOT_WINDOW=100; PIVOT_LOOKBACK=3; MIN_PIVOT_DIST=0.5
@@ -289,10 +288,7 @@ def get_golden_config():
         cfg=store.data.setdefault("settings",{}).get("golden_config")
         if not cfg or not isinstance(cfg,dict):
             cfg=dict(DEFAULT_GOLDEN_CONFIG); store.data["settings"]["golden_config"]=cfg; store.save("settings")
-        merged=dict(DEFAULT_GOLDEN_CONFIG); merged.update(cfg)
-        if merged.get("min_score",1)>6:
-            merged["min_score"]=3; cfg["min_score"]=3; store.save("settings")
-        return merged
+        merged=dict(DEFAULT_GOLDEN_CONFIG); merged.update(cfg); return merged
 def set_golden_config(key,value):
     with store.lock:
         cfg=store.data.setdefault("settings",{}).setdefault("golden_config",dict(DEFAULT_GOLDEN_CONFIG))
@@ -318,9 +314,21 @@ def user_status(uid,rec):
     if ADMIN_ID and uid==ADMIN_ID: return "admin",0
     if is_vip(uid): return "vip",0
     actual_days=(now_s()-int(rec.get("first_seen",now_s())))//DAY+1
-    if actual_days<=TRIAL_DAYS: return "trial",actual_days
-    if actual_days<VIP_FORCE_DAY: return "warning",actual_days
-    return "blocked",actual_days
+    
+    if actual_days > VIP_FORCE_DAY:
+        grace_until = rec.get("grace_until", 0)
+        if grace_until == 0:
+            with store.lock:
+                rec["grace_until"] = now_s() + (3 * DAY)
+                store.save("users")
+            return "grace", actual_days
+        elif now_s() < grace_until:
+            return "grace", actual_days
+        return "blocked", actual_days
+        
+    if actual_days <= TRIAL_DAYS: return "trial", actual_days
+    if actual_days <= VIP_FORCE_DAY: return "warning", actual_days
+    return "blocked", actual_days
 
 def add_vip(uid,days):
     with store.lock:
@@ -381,68 +389,36 @@ async def send_points_flash(msg_obj,pts,uid,bot_username=None):
         except Exception as _ex: log.debug('ignored: %s', _ex)
     except Exception as e: log.warning(f"send_points_flash: {e}")
 
-# ✅ Rate limiter محمي ضد 429/418
-_bn_lock=threading.Lock(); _bn_hist=[]; _bn_ban=[0.0]; _bn_last_err=["—"]
-BN_BUDGET=1500
-
-def _bn_get(path,params=None,weight=5,timeout=10):
-    waited=0.0
-    while True:
-        now=time.time()
-        if _bn_ban[0]>now:
-            _bn_last_err[0]=f"banned {int(_bn_ban[0]-now)}s"; return None
-        with _bn_lock:
-            while _bn_hist and _bn_hist[0][0]<now-60: _bn_hist.pop(0)
-            used=sum(w for _,w in _bn_hist)
-            if used+weight<=BN_BUDGET:
-                _bn_hist.append((now,weight)); break
-            wait=_bn_hist[0][0]+60-now if _bn_hist else 1
-        if waited>25:
-            _bn_last_err[0]="rate budget exhausted"; return None
-        step=min(max(wait,0.3),3.0); time.sleep(step); waited+=step
-    try:
-        r=requests.get(f"{BINANCE_FAPI_BASE}{path}",params=params,timeout=timeout)
-    except Exception as e:
-        _bn_last_err[0]=f"net {type(e).__name__}"; log.warning("fapi %s net error: %s",path,str(e)[:80]); return None
-    if r.status_code in (418,429):
-        ra=int(r.headers.get("Retry-After","60") or 60)
-        _bn_ban[0]=time.time()+min(max(ra,10),600)
-        _bn_last_err[0]=f"HTTP {r.status_code}"
-        log.warning("fapi %s -> %s (Retry-After %ss) — pause",path,r.status_code,ra); return None
-    if r.status_code!=200:
-        _bn_last_err[0]=f"HTTP {r.status_code}"
-        log.warning("fapi %s -> %s %s",path,r.status_code,r.text[:100]); return None
-    try: return r.json()
-    except Exception: return None
-
 def binance_futures_klines(sym,tf,bars=500):
     interval=BINANCE_INTERVAL_MAP.get(tf)
     if not interval: return None
     try:
-        lim=min(bars,1500); w=5 if lim<=500 else (10 if lim<=1000 else 20)
-        data=_bn_get("/fapi/v1/klines",{"symbol":f"{sym}USDT","interval":interval,"limit":lim},weight=w)
-        if isinstance(data,list) and data:
-            return [[int(k[0]),float(k[1]),float(k[2]),float(k[3]),float(k[4]),float(k[5])] for k in data]
+        r=requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/klines",
+                       params={"symbol":f"{sym}USDT","interval":interval,"limit":min(bars,1500)},timeout=10)
+        if r.status_code==200:
+            data=r.json()
+            if isinstance(data,list) and data:
+                return [[int(k[0]),float(k[1]),float(k[2]),float(k[3]),float(k[4]),float(k[5])] for k in data]
     except Exception as _ex: log.debug('ignored: %s', _ex)
     return None
 
 def binance_futures_ticker(sym):
     try:
-        d=_bn_get("/fapi/v1/ticker/24hr",{"symbol":f"{sym}USDT"},weight=1)
-        if isinstance(d,dict) and d:
+        r=requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/ticker/24hr",params={"symbol":f"{sym}USDT"},timeout=10)
+        if r.status_code==200:
+            d=r.json()
             return {"last":float(d.get("lastPrice",0)),"percentage":float(d.get("priceChangePercent",0)),
                     "quoteVolume":float(d.get("quoteVolume",0)),"high":float(d.get("highPrice",0)),
                     "low":float(d.get("lowPrice",0))}
     except Exception as _ex: log.debug('ignored: %s', _ex)
     return None
 
-_all_tk_cache=[0,[]]
 def binance_futures_all_tickers():
     try:
-        now=time.time()
-        if _all_tk_cache[1] and now-_all_tk_cache[0]<60: return _all_tk_cache[1]
-        data=_bn_get("/fapi/v1/ticker/24hr",None,weight=40,timeout=15)
-        if not isinstance(data,list): return _all_tk_cache[1] or None
+        r=requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/ticker/24hr",timeout=15)
+        if r.status_code!=200: return None
+        data=r.json()
+        if not isinstance(data,list): return None
         rows=[]
         for t in data:
             try:
@@ -456,7 +432,6 @@ def binance_futures_all_tickers():
                 if price<=0: continue
                 rows.append({"symbol":base_sym,"change":ch,"price":price,"volume":qv})
             except Exception: continue
-        if rows: _all_tk_cache[0]=now; _all_tk_cache[1]=rows
         return rows
     except Exception: return None
 
@@ -520,18 +495,9 @@ def _fetch_exchange(name,sym,tf,bars):
 _candle_cache={}
 def get_candles(sym,tf,bars=450,ttl=CANDLE_TTL,min_bars=MIN_BARS,binance_only=False):
     key=(sym,tf,bars,min_bars,binance_only)
-    if len(_candle_cache)>600:
-        for k_ in sorted(_candle_cache,key=lambda z:_candle_cache[z][0])[:200]: _candle_cache.pop(k_,None)
+    if len(_candle_cache)>400: _candle_cache.clear()
     hit=_candle_cache.get(key)
     if hit and time.time()-hit[0]<ttl: return hit[1]
-    try:
-        return _get_candles_fresh(sym,tf,bars,min_bars,binance_only,key)
-    except (NoData,PairNotFound):
-        if hit and time.time()-hit[0]<6*3600:
-            log.warning("get_candles %s %s: استخدام بيانات مخزنة قديمة",sym,tf); return hit[1]
-        raise
-
-def _get_candles_fresh(sym,tf,bars,min_bars,binance_only,key):
     try:
         rows=binance_futures_klines(sym,tf,bars)
         if rows and len(rows)>=min_bars:
@@ -548,11 +514,9 @@ def _get_candles_fresh(sym,tf,bars,min_bars,binance_only,key):
                 df.attrs.update(source="binance",degraded=False)
                 _candle_cache[key]=(time.time(),df); return df
     except Exception as _ex: log.debug('ignored: %s', _ex)
-    if binance_only:
-        log.warning("get_candles %s %s: binance فقط وفشل | %s",sym,tf,_bn_last_err[0]); raise NoData(sym)
+    if binance_only: raise NoData(sym)
     multi=is_multi_exchange()
-    if not multi:
-        log.warning("get_candles %s %s: Binance فشل وتعدد المنصات معطّل | %s",sym,tf,_bn_last_err[0]); raise NoData(sym)
+    if not multi: raise NoData(sym)
     bad,tried,best=0,0,None
     for name in EXCHANGES:
         if name=="binance": continue
@@ -560,8 +524,8 @@ def _get_candles_fresh(sym,tf,bars,min_bars,binance_only,key):
         tried+=1
         try: rows=_fetch_exchange(name,sym,tf,bars)
         except ccxt.BadSymbol: bad+=1; continue
-        except ccxt.NetworkError as e_: _down[name]=time.time()+120; log.warning("ccxt %s net: %s",name,str(e_)[:80]); continue
-        except Exception as e_: log.warning("ccxt %s %s: %s",name,sym,str(e_)[:80]); continue
+        except ccxt.NetworkError: _down[name]=time.time()+120; continue
+        except Exception: continue
         if not rows: continue
         df=_rows_to_df(rows,tf,bars)
         if len(df)>=min_bars:
@@ -571,7 +535,6 @@ def _get_candles_fresh(sym,tf,bars,min_bars,binance_only,key):
             df.attrs.update(source=name,degraded=True); best=df
     if best is not None:
         _candle_cache[key]=(time.time(),best); return best
-    log.warning("get_candles %s %s: فشلت كل المصادر (tried=%d bad=%d) | binance: %s",sym,tf,tried,bad,_bn_last_err[0])
     if tried>0 and bad==tried: raise PairNotFound(sym)
     raise NoData(sym)
 
@@ -725,10 +688,10 @@ def futures_long_short_ratio(sym,period="4h",limit=10):
 
 def futures_taker_flow(sym,limit=500):
     try:
-        data=_bn_get("/fapi/v1/aggTrades",{"symbol":f"{sym}USDT","limit":limit},weight=20,timeout=8)
-        if not isinstance(data,list): return None
+        r=requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/aggTrades",params={"symbol":f"{sym}USDT","limit":limit},timeout=8)
+        if r.status_code!=200: return None
         buy=sell=0.0
-        for t in data:
+        for t in r.json():
             q=float(t.get("q",0))
             if t.get("m"): sell+=q
             else: buy+=q
@@ -739,10 +702,10 @@ def futures_taker_flow(sym,limit=500):
 
 def futures_liquidations(sym,limit=100):
     try:
-        data=_bn_get("/fapi/v1/allForceOrders",{"symbol":f"{sym}USDT","limit":limit},weight=20,timeout=8)
-        if not isinstance(data,list): return None
+        r=requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/allForceOrders",params={"symbol":f"{sym}USDT","limit":limit},timeout=8)
+        if r.status_code!=200: return None
         longs=shorts=0.0
-        for o in data:
+        for o in r.json():
             notional=float(o.get("price",0))*float(o.get("origQty",0))
             if o.get("side")=="SELL": longs+=notional
             else: shorts+=notional
@@ -1136,33 +1099,39 @@ def compute_core_levels(df, i, side, price=None):
         r = df.iloc[i]; atr = float(r["atr"]) if not pd.isna(r["atr"]) else 0
         if atr <= 0: return None
         entry = float(price) if price else float(r["close"])
-        highs, lows = find_pivots(df, PIVOT_WINDOW)
-        targets = select_targets(highs if side==1 else lows, entry, side)
-        targets = [t for t in targets if abs(t - entry) <= atr * MAX_TP_ATR]
-        if len(targets) < 2:
-            targets = [entry + side * atr * m for m in [1.5, 3.0, 4.5, 6.0]]
+        
+        recent_df = df.tail(100)
+        if side == 1:
+            resistances = recent_df[recent_df["high"] > entry]["high"].unique()
+            targets = sorted([float(x) for x in resistances if float(x) > entry + (atr*0.5)])[:4]
+        else:
+            supports = recent_df[recent_df["low"] < entry]["low"].unique()
+            targets = sorted([float(x) for x in supports if float(x) < entry - (atr*0.5)], reverse=True)[:4]
+
+        if len(targets) < 4:
+            last_px = targets[-1] if targets else entry
+            while len(targets) < 4:
+                next_px = last_px + side * atr * 1.5
+                targets.append(next_px)
+                last_px = next_px
+
         targets = targets[:4]
-        if not targets: return None
-        lookback_df = df.tail(20)
+        
+        lookback_df = df.tail(15)
         swing = float(lookback_df["low"].min()) if side==1 else float(lookback_df["high"].max())
         sl_raw = swing - 0.1*atr if side==1 else swing + 0.1*atr
         dist_raw = abs(entry - sl_raw)
-        dist = min(max(dist_raw, entry*CORE_SL_MIN/100), entry*CORE_SL_MAX/100)
+        
+        dist = max(dist_raw, entry*CORE_SL_MIN/100)
         sl = entry - side * dist; risk = abs(entry - sl)
         if risk <= 0: return None
-        if abs(targets[0] - entry) < risk * MIN_RR_TP1:
-            targets = [entry + side * atr * m for m in [1.5, 3.0, 4.5, 6.0]]
+
         tps = []
         for idx, px in enumerate(targets):
             pct = 100 * side * (px - entry) / entry
             frac = CORE_TP_FRACS[idx] if idx < len(CORE_TP_FRACS) else 0
             tps.append(dict(px=float(px), pct=round(pct,2), frac=frac, hit=False, src=""))
-        while len(tps) < 4:
-            last_px = tps[-1]["px"]; next_px = last_px + side * atr * 1.5
-            pct = 100 * side * (next_px - entry) / entry
-            frac = CORE_TP_FRACS[len(tps)] if len(tps) < len(CORE_TP_FRACS) else 0
-            tps.append(dict(px=float(next_px), pct=round(pct,2), frac=frac, hit=False, src=""))
-        tps.sort(key=lambda x: x["px"], reverse=(side == -1))
+            
         return dict(entry=entry, sl=sl, risk=risk, tps=tps, atr=atr)
     except Exception: return None
 
@@ -1472,10 +1441,7 @@ def analyze(sym):
         try:
             df=get_candles(sym,try_tf,450); tf=try_tf; break
         except PairNotFound: raise
-        except NoData as e:
-            last_err=e
-            if try_tf==tf and _bn_ban[0]>time.time(): break
-            continue
+        except NoData as e: last_err=e; continue
     if df is None: raise last_err or NoData(sym)
     degraded=bool(df.attrs.get("degraded"))
     df=add_indicators(df,100); i=len(df)-1
@@ -1785,11 +1751,11 @@ def golden_score(sym,debug=False,relaxed=False):
         log.error(f"golden_score err {sym}: {e}")
         return None
 
-# ✅ سريع: لا sleep + max_workers=6
 def _run_golden_scan(syms,max_results,progress_cb,relaxed=False):
     results=[]; total=len(syms)
     def scan_one(sym):
         try:
+            time.sleep(0.15)
             return golden_score(sym,debug=False,relaxed=relaxed)
         except Exception: return None
     processed=0
@@ -1799,26 +1765,25 @@ def _run_golden_scan(syms,max_results,progress_cb,relaxed=False):
             processed+=1
             res=future.result()
             if res: results.append(res)
-            if progress_cb and processed%10==0:
+            if progress_cb and processed%50==0:
                 try: progress_cb(processed,total,len(results))
                 except Exception as _ex: log.debug('ignored: %s', _ex)
     results.sort(key=lambda x:-x["score"])
     return results[:max_results]
 
-# ✅ سريع: 300 عملة + 200 relaxed
 def golden_scan(max_results=2,progress_cb=None):
     try:
         rows=binance_futures_all_tickers()
         if rows:
             rows_sorted=sorted(rows,key=lambda x:-x["volume"])
-            syms=[x["symbol"] for x in rows_sorted if x["volume"]>2_000_000 and x["symbol"] not in EXCLUDE_TICKERS][:300]
+            syms=[x["symbol"] for x in rows_sorted if x["volume"]>2_000_000 and x["symbol"] not in EXCLUDE_TICKERS][:150]
         else: syms=top_symbols(600,binance_only=True)
     except Exception: syms=top_symbols(600,binance_only=True)
     if not syms: return []
     results=_run_golden_scan(syms,max_results,progress_cb,relaxed=False)
     if not results:
         log.info("golden_scan: no strict results, trying relaxed mode on top 200")
-        results=_run_golden_scan(syms[:200],max_results,progress_cb,relaxed=True)
+        results=_run_golden_scan(syms[:150],max_results,progress_cb,relaxed=True)
     return results
 
 def format_golden_post(g,tier="vip"):
@@ -2010,23 +1975,35 @@ def render_pattern_chart(res,tier="free"):
     fig=_new_fig(12,8,bg)
     ax=fig.add_axes([0.065,0.10,0.80,0.80])
     _draw_candles(ax,df,"#26a69a","#ef5350")
+    
+    sr_high = res.get("sr_high", [])
+    sr_low = res.get("sr_low", [])
+    for lvl in sr_high:
+        ax.axhline(lvl, color="#ef5350", lw=1.5, ls="--", alpha=0.7, zorder=4)
+        ax.text(n+1, lvl, f" RES {fmt(lvl)}", color="#ef5350", va="center", fontsize=9)
+    for lvl in sr_low:
+        ax.axhline(lvl, color="#2962ff", lw=1.5, ls="--", alpha=0.7, zorder=4)
+        ax.text(n+1, lvl, f" SUP {fmt(lvl)}", color="#2962ff", va="center", fontsize=9)
+
     col_map={"bullish":"#22c55e","bearish":"#facc15","neck":"#facc15","neutral":"#facc15"}
     ys=[float(df["low"].min()),float(df["high"].max())]
     pats=res.get("patterns",[])
+    
     for p in pats:
         for s in p.get("segments",[]):
             x1=_x_index(t_arr,s["t1"])
-            x2=(n+10) if s["ext"] else _x_index(t_arr,s["t2"])
+            x2=(n+5) if s["ext"] else _x_index(t_arr,s["t2"])
             seg_col=col_map.get(s["color"],"#facc15")
-            ax.plot([x1,x2],[s["p1"],s["p2"]],color=seg_col,lw=3.2,solid_capstyle="round",zorder=6,
-                    path_effects=[pe.withStroke(linewidth=7,foreground=seg_col,alpha=0.15),pe.Normal()])
+            ax.plot([x1,x2],[s["p1"],s["p2"]],color=seg_col,lw=2.5,solid_capstyle="round",zorder=6,
+                    path_effects=[pe.withStroke(linewidth=6,foreground=seg_col,alpha=0.2),pe.Normal()])
             ys+=[s["p1"],s["p2"]]
         for m in p.get("marks",[]):
             xm=_x_index(t_arr,m["t"]); c=col_map.get(p["bias"],"#facc15")
-            ax.scatter([xm],[m["p"]],s=46,color=c,edgecolor="white",linewidth=0.9,zorder=7)
-            ax.annotate(m["label"],(xm,m["p"]),xytext=(0,12 if p["bias"]=="bearish" else -16),
-                        textcoords="offset points",ha="center",fontsize=9,color="white",fontweight="bold",
-                        bbox=dict(boxstyle="round,pad=0.25",fc="#1c2230",ec=c,lw=1.0),zorder=8)
+            ax.scatter([xm],[m["p"]],s=60,color=c,edgecolor="white",linewidth=1.2,zorder=7)
+            ax.annotate(m["label"],(xm,m["p"]),xytext=(0,10 if p["bias"]=="bearish" else -15),
+                        textcoords="offset points",ha="center",fontsize=10,color="white",fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.3",fc="#1c2230",ec=c,lw=1.2),zorder=8)
+                        
     n_tps=4 if tier in ("admin","vip") else 2
     levels=[("ENTRY",lv["entry"],"#5c9dff","-."),("STOP",lv["sl"],"#ff5252","--")]
     for j,tp in enumerate(lv["tps"][:n_tps],1):
@@ -2043,9 +2020,9 @@ def render_pattern_chart(res,tier="free"):
     if pats:
         legend_lines=[f"● {p['name']}  [{p.get('tf','').upper()}]  {p['bias'].capitalize()}" for p in pats[:4]]
         ax.text(0.01,0.90,"\n".join(legend_lines),transform=ax.transAxes,va="top",ha="left",
-                fontsize=9,color=fg,bbox=dict(boxstyle="round,pad=0.4",fc="#1c2230",ec=grid))
+                fontsize=10,color=fg,bbox=dict(boxstyle="round,pad=0.4",fc="#1c2230",ec=grid))
     fig.text(0.065,0.945,f"{sym}/USDT  ·  {tf.upper()}  ·  {'LONG' if side == 1 else 'SHORT'}",
-             fontsize=17,fontweight="bold",color="#26a69a" if side==1 else "#ff5252",ha="left")
+             fontsize=18,fontweight="bold",color="#26a69a" if side==1 else "#ff5252",ha="left")
     fig.text(0.5,0.5,"Ryma Crypto",fontsize=64,color="#ffffff",alpha=0.035,ha="center",va="center",rotation=20,fontweight="bold")
     fig.text(0.065,0.012,"Automated analysis  ·  Source: Binance Live Data",fontsize=9,color="#94a3b8",ha="left")
     fig.text(0.985,0.012,"Ryma Crypto",fontsize=11,color="#c9a227",ha="right",fontweight="bold")
@@ -2156,17 +2133,16 @@ def caption_core(res,tier="free",lang="ar"):
     return "\n".join(lines)
 def caption_free(res,lang="ar"): return caption_core(res,"free",lang)
 def caption_vip(res,lang="ar"): return caption_core(res,"vip",lang)
-
-def keyboard_free(sym,tf,source="binance_fut"):
+    def keyboard_free(sym,tf,source="binance_fut"):
     return InlineKeyboardMarkup([
         [_btn("🧮 حاسبة المخاطر",callback_data=f"calc_risk:{sym}"),_btn("📊 إضافة للمحفظة",callback_data=f"add_port:{sym}")],
+        [_btn("📈 شارت النماذج",callback_data=f"pchart:{sym}:{tf}"), _btn("🔄 تحديث",callback_data=f"tf:{sym}:{tf}")],
         [_btn("📰 آخر الأخبار",callback_data=f"news:{sym}")],
         [_btn("🌐 جميع منصات التداول",callback_data=f"refs:{source}")],
         [_btn("💎 اشترك في VIP ✨",url=VIP_INVITE_LINK)],
         [_btn("🆓 قناة التوصيات المجانية",url=CHANNEL_LINK)],
-        [_btn("📞 تواصل معنا",url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")],
-        [_btn("📈 شارت النماذج",callback_data=f"pchart:{sym}:{tf}")],
-        [_btn("🔄 تحديث",callback_data=f"tf:{sym}:{tf}")]])
+        [_btn("📞 تواصل معنا",url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")]
+    ])
 
 def keyboard_vip(sym,tf,source="binance_fut"):
     return InlineKeyboardMarkup([
@@ -2406,7 +2382,7 @@ async def run_autopost(bot):
     if _free_day["d"]!=today: _free_day.update(d=today,n=0)
     a_candidates=[r for r in cands if r["grade"] in ("A+","A")]
     a_candidates.sort(key=lambda r:(-r.get("fut_score",0),-r["rank"]))
-    b_candidates=[r for r in cands if r["grade"]=="B"]
+    b_candidates=[r for r in cands if r["grade"]=="B"]   # public channels never get C
     vip_pool=a_candidates if a_candidates else b_candidates
     if len(active_signals())>=MAX_OPEN:
         log.warning(f"MAX_OPEN {len(active_signals())}/{MAX_OPEN}"); return dict(vip=0,free=0,total=0)
@@ -2714,18 +2690,30 @@ async def golden_loop(app):
         except Exception: log.exception("golden_loop")
         await asyncio.sleep(CYCLE_GOLDEN)
 
+_whale_day = {"date": "", "count": 0}
 async def whale_hunter_loop(app):
     await asyncio.sleep(60)
     log.info("whale_hunter_loop: بدء مراقبة الحيتان")
     _seen_whales=set()
     while True:
         try:
+            today = dt.datetime.now().strftime("%Y%m%d")
+            if _whale_day["date"] != today:
+                _whale_day["date"] = today
+                _whale_day["count"] = 0
+            
+            if _whale_day["count"] >= 5:
+                await asyncio.sleep(300)
+                continue
+
             syms=await asyncio.to_thread(top_symbols,20)
             for s in syms[:10]:
+                if _whale_day["count"] >= 5: break
                 try:
                     ex=get_ex("binance")
                     with _ex_lock["binance"]: trades=ex.fetch_trades(f"{s}/USDT",limit=50)
                     for tr in trades:
+                        if _whale_day["count"] >= 5: break
                         notional=float(tr.get("price",0))*float(tr.get("amount",0))
                         if notional >= 15000:
                             trade_id=f"{s}_{tr.get('id')}"
@@ -2740,6 +2728,7 @@ async def whale_hunter_loop(app):
                                 [_btn("📋 رابط التسجيل فقط",url=REFERRAL_LINKS["binance"][1])]])
                             await app.bot.send_message(ADMIN_ID,f"🚨 <b>صيد جديد (جاهز للنشر):</b>\n\n{text}",
                                 parse_mode=ParseMode.HTML,reply_markup=kb,link_preview_options=NO_PREVIEW)
+                            _whale_day["count"] += 1
                 except Exception: continue
         except asyncio.CancelledError: raise
         except Exception: log.exception("whale_hunter")
@@ -2795,7 +2784,6 @@ def recently_posted(sym, hours=6):
     cut = now_s() - hours*3600
     with store.lock:
         return any(k.startswith(f"{sym}:") and v > cut for k, v in store.data["posted"].items())
-
 
 def predictive_scan(symbols):
     out=[]
@@ -2864,7 +2852,9 @@ def binance_futures_klines_long(sym, tf, bars):
         while len(out) < bars:
             params = {"symbol": f"{sym}USDT", "interval": interval, "limit": 1500}
             if end: params["endTime"] = end
-            data = _bn_get("/fapi/v1/klines", params, weight=20)
+            r = requests.get(f"{BINANCE_FAPI_BASE}/fapi/v1/klines", params=params, timeout=10)
+            if r.status_code != 200: break
+            data = r.json()
             if not isinstance(data, list) or not data: break
             out = [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in data] + out
             end = int(data[0][0]) - 1
@@ -2969,7 +2959,7 @@ async def gate(update):
     if st=="warning":
         left=VIP_FORCE_DAY-day
         await update.message.reply_text(t("warning_trial",lang,left=left))
-    if st!="admin":
+    if st not in ("admin", "grace"):
         if time.time()-_cooldown.get(user.id,0)<3:
             await update.message.reply_text(t("wait_3s",lang)); return st,False
         _cooldown[user.id]=time.time()
@@ -3590,9 +3580,6 @@ async def cmd_debug(update,ctx):
         f"💎 Golden: كل {CYCLE_GOLDEN//3600}س | Min score: {get_golden_config().get('min_score',1)}",
         f"🕯️ Patterns: MTF (1D+4H+1H) ✅",
         f"🎯 Points: {VIP_THRESHOLD}=VIP{VIP_REWARD_DAYS}d | +{POINTS_REFERRAL}/referral"]
-    probe=await asyncio.to_thread(binance_futures_klines,"BTC","4h",300)
-    lines.append(f"🧪 Binance klines BTC: {'✅ '+str(len(probe))+' شمعة' if probe else '❌ '+_bn_last_err[0]}")
-    lines.append(f"⏱ ضغط الطلبات (آخر دقيقة): {sum(w for _,w in _bn_hist)}/{BN_BUDGET}")
     syms=await asyncio.to_thread(top_symbols,60); lines.append(f"🎯 top_symbols: {len(syms)}")
     if syms: lines.append(f"   {', '.join(syms[:10])}")
     g,l=await asyncio.to_thread(get_top_movers,True)
@@ -3718,7 +3705,7 @@ async def cmd_users(update,ctx):
         n=(u.get("name") or "").strip(); un=(u.get("username") or "").strip()
         label=f"{n} (@{un})" if n and un else (n or (f"@{un}" if un else f"ID:{u['id']}"))
         st,_=user_status(int(u["id"]),u)
-        icon={"admin":"👑","vip":"💎","trial":"🆓","warning":"⚠️","blocked":"⛔"}.get(st,"•")
+        icon={"admin":"👑","vip":"💎","trial":"🆓","warning":"⚠️","blocked":"⛔","grace":"🎁"}.get(st,"•")
         lines+=[f"{icon} {label}",f"    📊 {u.get('requests',0)} | نقاط: {u.get('points',0)} | آخر: {time_ago(u.get('last_seen'))}"]
     await update.message.reply_text("\n".join(lines)[:4000],link_preview_options=NO_PREVIEW)
 
@@ -3820,7 +3807,7 @@ async def cb_handler(update,ctx):
             return
         if key=="min_score":
             cfg=get_golden_config(); current=cfg.get("min_score",1)
-            cycle={0:1,1:2,2:3,3:4,4:5,5:6,6:0}
+            cycle={0:1,1:2,2:3,3:4,4:5,5:6,6:7,7:8,8:9,9:0}
             set_golden_config("min_score",cycle.get(current,1))
             try: await q.message.edit_text(build_golden_config_text(),reply_markup=keyboard_golden_config(),parse_mode=ParseMode.HTML)
             except Exception as _ex: log.debug('ignored: %s', _ex)
@@ -4174,22 +4161,29 @@ async def on_text(update,ctx):
     try:
         res=await asyncio.to_thread(get_analysis,sym)
         tier="admin" if st=="admin" else ("vip" if st=="vip" else "free")
-        kb=keyboard(sym,res["tf"],tier,"binance_fut")
-        img=await asyncio.to_thread(render_chart,res,tier)
-        if tier=="admin":
+        
+        if tier == "free":
+            text_caption = caption_free(res, lang)
+            await update.message.reply_text(text_caption, parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
+        
+        elif tier == "vip":
+            kb=keyboard(sym,res["tf"],tier,"binance_fut")
+            img=await asyncio.to_thread(render_chart,res,tier)
+            await update.message.reply_photo(photo=img, reply_markup=kb)
+            
+        elif tier == "admin":
+            kb=keyboard(sym,res["tf"],tier,"binance_fut")
             card=await asyncio.to_thread(render_trade_card,res,tier)
             await update.message.reply_photo(photo=card,reply_markup=kb)
+            img=await asyncio.to_thread(render_chart,res,tier)
             await update.message.reply_photo(photo=img)
-        else:
-            await update.message.reply_photo(photo=img,reply_markup=kb)
-        if tier=="admin": await send_admin_copy(update.message,res)
+            await send_admin_copy(update.message,res)
+            
         cur_pts=store.data["users"].get(uid,{}).get("points",0)
         bot_un=ctx.application.bot_data.get("username","")
         await send_points_flash(update.message,cur_pts,update.effective_user.id,bot_un)
-    except PairNotFound:
-        log.warning("PairNotFound %s",sym); await update.message.reply_text(t("not_found",lang,sym=sym))
-    except NoData as e:
-        log.warning("NoData %s: %r | binance: %s",sym,e,_bn_last_err[0]); await update.message.reply_text(t("no_data",lang))
+    except PairNotFound: await update.message.reply_text(t("not_found",lang,sym=sym))
+    except NoData: await update.message.reply_text(t("no_data",lang))
     except Exception:
         log.exception("handle"); await update.message.reply_text(t("error",lang))
     finally:
@@ -4228,7 +4222,7 @@ async def post_init(app):
         asyncio.create_task(whale_hunter_loop(app)),
         asyncio.create_task(weekly_report_loop(app)),asyncio.create_task(trial_notice_loop(app)),
         asyncio.create_task(morning_brief_loop(app))]
-    log.info("ryma v108 | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$15000 | fast_golden",
+    log.info("ryma v106 | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$15000",
              MAX_OPEN,CYCLE_GOLDEN,get_golden_config().get("min_score",1),is_multi_exchange(),
              VIP_THRESHOLD,VIP_REWARD_DAYS)
 
@@ -4266,4 +4260,4 @@ def main():
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    main() 
+    main()
