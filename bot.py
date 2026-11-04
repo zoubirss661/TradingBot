@@ -2133,7 +2133,7 @@ def caption_core(res,tier="free",lang="ar"):
     return "\n".join(lines)
 def caption_free(res,lang="ar"): return caption_core(res,"free",lang)
 def caption_vip(res,lang="ar"): return caption_core(res,"vip",lang)
-    def keyboard_free(sym,tf,source="binance_fut"):
+def keyboard_free(sym,tf,source="binance_fut"):
     return InlineKeyboardMarkup([
         [_btn("🧮 حاسبة المخاطر",callback_data=f"calc_risk:{sym}"),_btn("📊 إضافة للمحفظة",callback_data=f"add_port:{sym}")],
         [_btn("📈 شارت النماذج",callback_data=f"pchart:{sym}:{tf}"), _btn("🔄 تحديث",callback_data=f"tf:{sym}:{tf}")],
