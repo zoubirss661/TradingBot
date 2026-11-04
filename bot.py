@@ -2725,7 +2725,7 @@ def build_weekly_report():
              "⚠️ الأرقام من الصفقات المسجلة فعلياً فقط، ونتائج الماضي لا تضمن المستقبل.",
              RISK_WARNING]
     return "\n".join(lines)
-    async def weekly_report_loop(app):
+async def weekly_report_loop(app):
     await asyncio.sleep(900)
     while True:
         try:
