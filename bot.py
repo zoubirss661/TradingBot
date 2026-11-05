@@ -447,7 +447,7 @@ async def send_points_flash(msg_obj,pts,uid,bot_username=None):
         try: await sent.edit_text(final,parse_mode=ParseMode.HTML,link_preview_options=NO_PREVIEW)
         except Exception as _ex: log.debug('ignored: %s', _ex)
     except Exception as e: log.warning(f"send_points_flash: {e}")
-        def binance_futures_klines(sym,tf,bars=500):
+def binance_futures_klines(sym,tf,bars=500):
     interval=BINANCE_INTERVAL_MAP.get(tf)
     if not interval: return None
     try:
