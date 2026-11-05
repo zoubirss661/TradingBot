@@ -7,7 +7,7 @@ matplotlib.use("Agg")
 matplotlib.rcParams["font.family"] = ["DejaVu Sans", "Noto Naskh Arabic", "Amiri", "sans-serif"]
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
-from matplotlib.patches import FancyBboxPatch, Rectangle
+from matplotlib.patches import FancyBboxPatch, Rectangle, Polygon
 import matplotlib.patheffects as pe
 from matplotlib.colors import LinearSegmentedColormap
 try:
@@ -48,14 +48,17 @@ PAYMENT_INFO = _e("PAYMENT_INFO", "Binance Pay: 905142395")
 PROTECT = _e("PROTECT_CONTENT", "1") == "1"
 MAINTENANCE = _e("MAINTENANCE", "0") == "1"
 BRAND = "💎 Ryma Crypto 💎"
-RISK_WARNING = "⚠️ <i>التداول ينطوي على مخاطر عالية. يرجى إدارة رأس المال بذكاء. ليست نصيحة مالية.</i>"
+WHALE_MIN_USD = 500000
+
+RISK_WARNING_AR = "⚠️ <i>التداول ينطوي على مخاطر عالية. يرجى إدارة رأس المال بذكاء. ليست نصيحة مالية.</i>"
+RISK_WARNING_EN = "⚠️ <i>Trading involves high risk. Please manage your capital wisely. Not financial advice.</i>"
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 def _btn(text, style=None, **kw):
     if style is None:
-        if text.startswith("❌") or "إغلاق" in text: style = "danger"
-        elif "اشترك" in text or "الانضمام" in text or "Subscribe" in text: style = "success"
-        elif "شارت" in text or "تحديث" in text or "نسخ" in text: style = "primary"
+        if text.startswith("❌") or "إغلاق" in text or "Close" in text: style = "danger"
+        elif "اشترك" in text or "Subscribe" in text or "VIP" in text: style = "success"
+        elif "شارت" in text or "Chart" in text or "تحديث" in text or "Refresh" in text: style = "primary"
     if style: kw["api_kwargs"] = {"style": style}
     return InlineKeyboardButton(text, **kw)
 
@@ -128,7 +131,7 @@ POINTS_DAILY = 1; POINTS_PROMO = 5; POINTS_REFERRAL = 20
 VIP_THRESHOLD = 200; VIP_REWARD_DAYS = 1
 ALPHA_MAJORS_EXCLUDE = {"BTC","ETH","BNB","SOL","XRP","ADA","DOGE","AVAX","LINK","DOT","LTC","TRX","TON","SHIB","PEPE","USDC","FDUSD","TUSD","USDT","DAI","BUSD","USDP","USDD","USDE","PYUSD"}
 TRIAL_DAYS = 7
-VIP_FORCE_DAY = 12 # 7 ايام تجربة + 5 ايام تنبيه = توقف في اليوم 13
+VIP_FORCE_DAY = 12 
 FEE, SLIP = 0.0008, 0.0005
 TF_MS = {"15m":900_000,"1h":3_600_000,"4h":14_400_000,"1d":86_400_000}
 CANDLE_TTL, PRICE_TTL = 240, 60
@@ -140,8 +143,8 @@ CYCLE_GOLDEN=18000; CYCLE_PROMO=604800; CROSS_CHECK_INTERVAL=3600
 SMART_PROFIT_DAYS=7; SMART_MAX_AGE_DAYS=14; SMART_FORCE_DAYS=3
 SMART_FILL_TRIGGER=0.8; CLEANUP_EVERY_CYCLES=12
 PIVOT_WINDOW=100; PIVOT_LOOKBACK=3; MIN_PIVOT_DIST=0.5
-CORE_SL_MAX=4.0; CORE_SL_MIN=1.5
-MAX_TP_ATR = 6.0; MIN_RR_TP1 = 1.0
+CORE_SL_MAX=3.0; CORE_SL_MIN=1.5
+MAX_TP_ATR = 6.0; MIN_RR_TP1 = 1.8
 CORE_TP_FRACS=[0.50,0.25,0.15,0.10]
 BE_TRIGGER_R=0.1; TRAIL_ATR=3.0; MAX_HOLD=60
 CORE_VOL_MULT=0.7; CORE_RSI_LONG=(35,70); CORE_RSI_SHORT=(50,80); EXT_MAX_ATR=3.5
@@ -248,26 +251,82 @@ def detect_lang(text):
 def get_user_lang(uid):
     with store.lock:
         u=store.data["users"].get(str(uid),{})
-        return u.get("lang","ar")
+        return u.get("lang","en")
 
 def set_user_lang(uid,lang):
     with store.lock:
         if str(uid) in store.data["users"]:
             store.data["users"][str(uid)]["lang"]=lang; store.save("users")
 
-TEXTS={"ar":{"analyzing":"⏳ جارٍ تحليل {sym}...","not_found":"❌ لم يتم العثور على العملة: {sym}",
-    "no_data":"⚠️ البيانات غير متوفرة","error":"⚠️ حدث خطأ","invalid_symbol":"📝 إدخال رمز عملة صحيح",
-    "not_supported":"⛔ هذا الرمز غير مدعوم (أسهم أو غير متاح).","maintenance":"🔧 صيانة.\n📞 {contact}",
-    "blocked":"⛔ انتهت التجربة.\n📞 {contact}","warning_trial":"⚠️ تنبيه: تجربتك المجانية تنتهي خلال {left} أيام.\n💎 استعد للاشتراك في VIP للاستمرار دون انقطاع.",
-    "wait_3s":"⏳ انتظار 3 ثوان","vip_only":"🔒 VIP فقط","admin_only":"⛔ للأدمن فقط"},
-    "en":{"analyzing":"⏳ Analyzing {sym}...","not_found":"❌ Coin not found: {sym}",
-    "no_data":"⚠️ Data not available","error":"⚠️ An error occurred","invalid_symbol":"📝 Please enter a valid coin symbol",
-    "not_supported":"⛔ This symbol is not supported (stocks or unavailable).","maintenance":"🔧 Maintenance.\n📞 {contact}",
-    "blocked":"⛔ Trial expired.\n📞 {contact}","warning_trial":"⚠️ Heads up: your free trial ends in {left} days.\n💎 Get ready to subscribe to VIP to keep access.",
-    "wait_3s":"⏳ Please wait 3 seconds","vip_only":"🔒 VIP only","admin_only":"⛔ Admin only"}}
+TEXTS = {
+    "ar": {
+        "analyzing": "⏳ جارٍ تحليل {sym}...",
+        "not_found": "❌ لم يتم العثور على العملة: {sym}",
+        "no_data": "⚠️ البيانات غير متوفرة حالياً.",
+        "error": "⚠️ حدث خطأ أثناء التحليل.",
+        "invalid_symbol": "📝 إدخال رمز عملة صحيح.",
+        "not_supported": "⛔ هذا الرمز غير مدعوم (أسهم أو غير متاح).",
+        "maintenance": "🔧 صيانة.\n📞 {contact}",
+        "blocked": "⛔ انتهت التجربة.\n📞 {contact}",
+        "warning_trial": "⚠️ تنبيه: تجربتك المجانية تنتهي خلال {left} أيام.\n💎 استعد للاشتراك في VIP للاستمرار دون انقطاع.",
+        "wait_3s": "⏳ انتظار 3 ثوان...",
+        "vip_only": "🔒 VIP فقط",
+        "admin_only": "⛔ للأدمن فقط",
+        "welcome": "أهلاً {name}! 👋\n\nمرحباً بك في بوت **Ryma Crypto** للتحليل الفني الذكي.\n\n📌 **طريقة الاستخدام:**\nفقط أرسل اسم أي عملة (مثل BTC أو ETH) وسأقوم بتحليلها فوراً وتزويدك بـ:\n- نقاط الدخول والخروج.\n- 4 أهداف ذكية.\n- وقف الخسارة المناسب.\n- النماذج الفنية.\n\n📊 الأزرار بالأسفل تتيح لك الوصول السريع لحاسبة المخاطر، محفظتك، والشارتات.",
+        "risk_btn": "🧮 حاسبة المخاطر",
+        "port_btn": "📊 محفظتي",
+        "chart_btn": "📈 الشارت",
+        "pat_btn": "🕯️ النماذج",
+        "news_btn": "📰 الأخبار",
+        "refs_btn": "🌐 المنصات",
+        "vip_btn": "💎 اشترك VIP",
+        "free_btn": "🆓 القناة المجانية",
+        "contact_btn": "📞 تواصل معنا",
+        "refresh_btn": "🔄 تحديث",
+        "close_btn": "❌ إغلاق",
+        "calc_prompt": "🧮 **حاسبة إدارة المخاطر ({sym})**\n\nأرسل رأس مالك ونسبة المخاطرة مفصولة بمسافة.\nمثال: `1000 2`",
+        "port_prompt": "📊 **إضافة {sym} للمحفظة**\n\nكم المبلغ الذي استثمرته بالدولار؟\nمثال: `100`",
+        "risk_res": "🧮 **نتيجة إدارة المخاطر لـ {sym}:**\n\n💰 رأس المال: ${cap}\n🛑 المخاطرة ({risk_pct}%): ${risk_amt:.2f}\n➡️ حجم العقد: {size:.4f}\n💵 قيمة الصفقة: ${value:.2f}\n\n⚙️ **الرافعة المقترحة:** {lev:.1f}x\n<i>(استخدم دائماً العزل Isolated)</i>",
+        "risk_err": "⚠️ صيغة خاطئة (مثال: 1000 2)",
+        "port_added": "✅ تمت إضافة {sym} إلى محفظتك (${amount}).",
+        "port_err": "⚠️ أرسل رقماً صحيحاً (مثال: 100)",
+    },
+    "en": {
+        "analyzing": "⏳ Analyzing {sym}...",
+        "not_found": "❌ Coin not found: {sym}",
+        "no_data": "⚠️ Data currently unavailable.",
+        "error": "⚠️ An error occurred.",
+        "invalid_symbol": "📝 Please enter a valid coin symbol.",
+        "not_supported": "⛔ This symbol is not supported.",
+        "maintenance": "🔧 Maintenance.\n📞 {contact}",
+        "blocked": "⛔ Trial expired.\n📞 {contact}",
+        "warning_trial": "⚠️ Heads up: your free trial ends in {left} days.\n💎 Get ready to subscribe to VIP to keep access.",
+        "wait_3s": "⏳ Please wait 3 seconds...",
+        "vip_only": "🔒 VIP only",
+        "admin_only": "⛔ Admin only",
+        "welcome": "Welcome {name}! 👋\n\nWelcome to **Ryma Crypto Bot** for smart technical analysis.\n\n📌 **How to use:**\nJust send any coin symbol (e.g., BTC or ETH) and I will instantly analyze it for you, providing:\n- Entry and exit points.\n- 4 smart targets.\n- Proper Stop Loss.\n- Chart patterns.\n\n📊 Use the buttons below for quick access to the Risk Calculator, Portfolio, and Charts.",
+        "risk_btn": "🧮 Risk Calculator",
+        "port_btn": "📊 Portfolio",
+        "chart_btn": "📈 Chart",
+        "pat_btn": "🕯️ Patterns",
+        "news_btn": "📰 News",
+        "refs_btn": "🌐 Exchanges",
+        "vip_btn": "💎 Subscribe VIP",
+        "free_btn": "🆓 Free Channel",
+        "contact_btn": "📞 Contact Us",
+        "refresh_btn": "🔄 Refresh",
+        "close_btn": "❌ Close",
+        "calc_prompt": "🧮 **Risk Calculator ({sym})**\n\nSend your capital and risk % separated by a space.\nExample: `1000 2`",
+        "port_prompt": "📊 **Add {sym} to Portfolio**\n\nHow much did you invest in USD?\nExample: `100`",
+        "risk_res": "🧮 **Risk Management Result for {sym}:**\n\n💰 Capital: ${cap}\n🛑 Risk ({risk_pct}%): ${risk_amt:.2f}\n➡️ Position Size: {size:.4f}\n💵 Position Value: ${value:.2f}\n\n⚙️ **Suggested Leverage:** {lev:.1f}x\n<i>(Always use Isolated margin)</i>",
+        "risk_err": "⚠️ Invalid format (e.g., 1000 2)",
+        "port_added": "✅ {sym} added to your portfolio (${amount}).",
+        "port_err": "⚠️ Send a valid number (e.g., 100)",
+    }
+}
 
-def t(key,lang="ar",**kw):
-    text=TEXTS.get(lang,TEXTS["ar"]).get(key,TEXTS["ar"].get(key,key))
+def t(key, lang="en", **kw):
+    text = TEXTS.get(lang, TEXTS["en"]).get(key, TEXTS["en"].get(key, key))
     try: return text.format(**kw)
     except Exception: return text
 
@@ -298,6 +357,11 @@ def touch_user(user,cmd="text"):
     uid=str(user.id)
     with store.lock:
         u=store.data["users"].get(uid) or dict(id=user.id,first_seen=now_s(),requests=0,cmds={},last_cmd=None,points=0)
+        
+        # تحديد اللغة تلقائياً
+        if "lang" not in u:
+            u["lang"] = "ar" if (user.language_code or "").startswith("ar") else "en"
+
         last_seen_date=dt.datetime.fromtimestamp(u.get("last_seen",0)).date()
         current_date=dt.datetime.now().date()
         if current_date>last_seen_date: u["points"]=u.get("points",0)+POINTS_DAILY
@@ -1810,7 +1874,7 @@ def format_golden_post(g,tier="vip"):
             emoji="🟢" if p["bias"]=="bullish" else ("🔴" if p["bias"]=="bearish" else "⚪")
             tf_lbl=f" [{p.get('tf','').upper()}]" if p.get('tf') else ""
             lines.append(f"  {emoji} {p['name']}{tf_lbl}")
-    lines+=["","━━━━━━━━━━━━━━━━━━━━━",RISK_WARNING,f"👤 {BRAND}"]
+    lines+=["","━━━━━━━━━━━━━━━━━━━━━",RISK_WARNING_AR,f"👤 {BRAND}"]
     return "\n".join(lines)
 
 def build_whale_tweet(sym,side,notional,price):
@@ -1996,6 +2060,10 @@ def render_pattern_chart(res,tier="free"):
             seg_col=col_map.get(s["color"],"#facc15")
             ax.plot([x1,x2],[s["p1"],s["p2"]],color=seg_col,lw=2.5,solid_capstyle="round",zorder=6,
                     path_effects=[pe.withStroke(linewidth=6,foreground=seg_col,alpha=0.2),pe.Normal()])
+            
+            if p['name'] in ["Ascending Triangle", "Descending Triangle", "Symmetrical Triangle", "Rising Wedge", "Falling Wedge"]:
+                ax.fill_between([x1,x2], [s["p1"],s["p2"]], [ys[0],ys[0]], color=seg_col, alpha=0.05, zorder=1)
+
             ys+=[s["p1"],s["p2"]]
         for m in p.get("marks",[]):
             xm=_x_index(t_arr,m["t"]); c=col_map.get(p["bias"],"#facc15")
@@ -2095,15 +2163,14 @@ def caption_core(res,tier="free",lang="ar"):
         pats=res.get("patterns",[])
         if pats:
             lines.append("")
-            pat_names=" | ".join(f"{p['name']}{'[' + p.get('tf','').upper() + ']' if p.get('tf') else ''} {'🟢' if p['bias']=='bullish' else ('🔴' if p['bias']=='bearish' else '⚪')}" for p in pats[:2])
+            pat_names=" | ".join(f"{p['name']}{'[' + p.get('tf','').upper() + ']' if p.get('tf') else ''}" for p in pats[:2])
             lines.append(f"🕯 Pattern: {pat_names}")
         if grade in ("B","C"): lines+=["","👁 <b>Watch setup:</b> enter only after breakout/breakdown is confirmed"]
         lines+=["","━━━━━━━━━━━━━━━━",f"🎯 <b>Expected Decision: {decision}</b>"]
-        lines+=["","╔═══════ ⚠️ Alerts ═══════╗","║ 📌 Not all trades succeed",
-            "║ 📌 Risk management is key","║ 📌 Position size matters",
-            "║ 📌 Do your own research","╚═══════════════════════════╝",
-            "",f"📅 {now_ts}",f"👤 {BRAND}"]
+        lines+=["",RISK_WARNING_EN,f"👤 {BRAND}"]
         return "\n".join(lines)
+        
+    # Arabic
     side_word="🟢 شراء (LONG)" if side==1 else "🔴 بيع (SHORT)"
     decision="🟢 شراء" if side==1 else "🔴 بيع"
     now_ts=dt.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -2122,36 +2189,32 @@ def caption_core(res,tier="free",lang="ar"):
     pats=res.get("patterns",[])
     if pats:
         lines.append("")
-        pat_names=" | ".join(f"{p['name']}{'[' + p.get('tf','').upper() + ']' if p.get('tf') else ''} {'🟢' if p['bias']=='bullish' else ('🔴' if p['bias']=='bearish' else '⚪')}" for p in pats[:2])
+        pat_names=" | ".join(f"{p['name']}{'[' + p.get('tf','').upper() + ']' if p.get('tf') else ''}" for p in pats[:2])
         lines.append(f"🕯 النموذج: {pat_names}")
     if grade in ("B","C"): lines+=["","👁 <b>صفقة مراقبة:</b> ادخل فقط بعد تأكيد الاختراق أو الكسر"]
     lines+=["","━━━━━━━━━━━━━━━━",f"🎯 <b>القرار المتوقع: {decision}</b>"]
-    lines+=["","╔═══════ ⚠️ تنبيهات ═══════╗","║ 📌 ليست كل صفقاتنا ناجحة",
-        "║ 📌 إدارة المخاطر سر النجاح","║ 📌 إدارة حجم الصفقة مطلوبة",
-        "║ 📌 إجراء بحث خاص قبل الدخول","╚═══════════════════════════╝",
-        "",f"📅 {now_ts}",f"👤 {BRAND}"]
+    lines+=["",RISK_WARNING_AR,f"👤 {BRAND}"]
     return "\n".join(lines)
-def caption_free(res,lang="ar"): return caption_core(res,"free",lang)
-def caption_vip(res,lang="ar"): return caption_core(res,"vip",lang)
-def keyboard_free(sym,tf,source="binance_fut"):
+
+def keyboard_free(sym,tf,source="binance_fut",lang="en"):
     return InlineKeyboardMarkup([
-        [_btn("🧮 حاسبة المخاطر",callback_data=f"calc_risk:{sym}"),_btn("📊 إضافة للمحفظة",callback_data=f"add_port:{sym}")],
-        [_btn("📈 شارت النماذج",callback_data=f"pchart:{sym}:{tf}"), _btn("🔄 تحديث",callback_data=f"tf:{sym}:{tf}")],
-        [_btn("📰 آخر الأخبار",callback_data=f"news:{sym}")],
-        [_btn("🌐 جميع منصات التداول",callback_data=f"refs:{source}")],
-        [_btn("💎 اشترك في VIP ✨",url=VIP_INVITE_LINK)],
-        [_btn("🆓 قناة التوصيات المجانية",url=CHANNEL_LINK)],
-        [_btn("📞 تواصل معنا",url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")]
+        [_btn(t("risk_btn",lang),callback_data=f"calc_risk:{sym}"),_btn(t("port_btn",lang),callback_data=f"add_port:{sym}")],
+        [_btn(t("chart_btn",lang),callback_data=f"chart:{sym}"), _btn(t("refresh_btn",lang),callback_data=f"tf:{sym}:{tf}")],
+        [_btn(t("news_btn",lang),callback_data=f"news:{sym}")],
+        [_btn(t("refs_btn",lang),callback_data=f"refs:{source}")],
+        [_btn(t("vip_btn",lang),url=VIP_INVITE_LINK)],
+        [_btn(t("free_btn",lang),url=CHANNEL_LINK)],
+        [_btn(t("contact_btn",lang),url=f"https://t.me/{CONTACT_LINK.lstrip('@')}")]
     ])
 
-def keyboard_vip(sym,tf,source="binance_fut"):
+def keyboard_vip(sym,tf,source="binance_fut",lang="en"):
     return InlineKeyboardMarkup([
-        [_btn("🧮 حاسبة المخاطر",callback_data=f"calc_risk:{sym}"),_btn("📊 إضافة للمحفظة",callback_data=f"add_port:{sym}")],
-        [_btn("📤 مشاركة الصفقة",callback_data=f"share:{sym}"),_btn("📰 آخر الأخبار",callback_data=f"news:{sym}")],
-        [_btn("🌐 جميع المنصات",callback_data=f"refs:{source}")],
-        [_btn("📋 القائمة",callback_data="vip_menu")],
-        [_btn("📈 شارت النماذج",callback_data=f"pchart:{sym}:{tf}")],
-        [_btn("🔄 تحديث",callback_data=f"tf:{sym}:{tf}")]])
+        [_btn(t("risk_btn",lang),callback_data=f"calc_risk:{sym}"),_btn(t("port_btn",lang),callback_data=f"add_port:{sym}")],
+        [_btn("📤 مشاركة الصفقة" if lang=="ar" else "📤 Share Trade",callback_data=f"share:{sym}"),_btn(t("news_btn",lang),callback_data=f"news:{sym}")],
+        [_btn(t("refs_btn",lang),callback_data=f"refs:{source}")],
+        [_btn("📋 القائمة" if lang=="ar" else "📋 Menu",callback_data="vip_menu")],
+        [_btn(t("chart_btn",lang),callback_data=f"chart:{sym}")],
+        [_btn(t("refresh_btn",lang),callback_data=f"tf:{sym}:{tf}")]])
 
 def keyboard_admin(sym,tf,source="binance_fut"):
     return InlineKeyboardMarkup([
@@ -2164,10 +2227,10 @@ def keyboard_admin(sym,tf,source="binance_fut"):
         [_btn("📈 شارت النماذج",callback_data=f"pchart:{sym}:{tf}")],
         [_btn("🔄 تحديث",callback_data=f"tf:{sym}:{tf}")]])
 
-def keyboard(sym,tf,tier,source="binance_fut"):
+def keyboard(sym,tf,tier,source="binance_fut",lang="en"):
     if tier=="admin": return keyboard_admin(sym,tf,source)
-    if tier=="vip": return keyboard_vip(sym,tf,source)
-    return keyboard_free(sym,tf,source)
+    if tier=="vip": return keyboard_vip(sym,tf,source,lang)
+    return keyboard_free(sym,tf,source,lang)
 
 def keyboard_refs(current="binance_fut"):
     cur=(current or "binance").lower()
@@ -2314,11 +2377,11 @@ async def publish(bot,res,vip=True,free=False,admin_copy=False):
     try:
         if vip and VIP_CHANNEL_ID:
             img=await asyncio.to_thread(render_chart,res,"vip",True)
-            await bot.send_photo(VIP_CHANNEL_ID,img,protect_content=PROTECT,reply_markup=keyboard_vip(res["sym"],res["tf"],source))
+            await bot.send_photo(VIP_CHANNEL_ID,img,protect_content=PROTECT,reply_markup=keyboard_vip(res["sym"],res["tf"],source,"ar"))
             sent.append("VIP")
         if free and CHANNEL_ID:
             img=await asyncio.to_thread(render_chart,res,"free",True)
-            await bot.send_photo(CHANNEL_ID,img,protect_content=PROTECT,reply_markup=keyboard_free(res["sym"],res["tf"],source))
+            await bot.send_photo(CHANNEL_ID,img,protect_content=PROTECT,reply_markup=keyboard_free(res["sym"],res["tf"],source,"ar"))
             sent.append("FREE")
         if admin_copy and ADMIN_ID:
             card=await asyncio.to_thread(render_trade_card,res,"admin")
@@ -2423,7 +2486,7 @@ def build_promo_post():
     lines+=["━━━━━━━━━━━━━━━━━━━━━","✅ رسوم منخفضة","✅ سيولة عالية",
         "✅ عقود فيوتشر احترافية","✅ دعم فني 24/7","",
         "🎁 <b>للحصول على تجربة مجانية:</b> اكتب كلمة (تجربة) في الردود","",
-        RISK_WARNING,f"👤 {BRAND}"]
+        RISK_WARNING_AR,f"👤 {BRAND}"]
     return "\n".join(lines)
 
 async def autopost_loop(app):
@@ -2584,7 +2647,7 @@ async def short_free_loop(app):
                     for s,r in rows:
                         cl=coin_link(s,"binance_fut")
                         lines+=[f"💠 <a href='{cl}'>#{s}</a> 👆 — RSI {r['rsi']}",f"💵 {fmt(r['price'])}",f"🎯 القرار المتوقع: 🔴 بيع",""]
-                    lines.append("💎 للأدق → VIP"); lines.append(RISK_WARNING)
+                    lines.append("💎 للأدق → VIP"); lines.append(RISK_WARNING_AR)
                     try: await app.bot.send_message(CHANNEL_ID,"\n".join(lines),protect_content=PROTECT,link_preview_options=NO_PREVIEW)
                     except Exception as _ex: log.debug('ignored: %s', _ex)
         except asyncio.CancelledError: raise
@@ -2715,7 +2778,7 @@ async def whale_hunter_loop(app):
                     for tr in trades:
                         if _whale_day["count"] >= 5: break
                         notional=float(tr.get("price",0))*float(tr.get("amount",0))
-                        if notional >= 15000:
+                        if notional >= WHALE_MIN_USD:
                             trade_id=f"{s}_{tr.get('id')}"
                             if trade_id in _seen_whales: continue
                             _seen_whales.add(trade_id)
@@ -2765,7 +2828,7 @@ def build_weekly_report():
              f"💰 صافي النتيجة: <b>{R.sum():+.1f}R</b>", "",
              f"🏆 أفضل صفقة: #{best['coin']} {float(best.get('R') or 0):+.2f}R", "",
              "⚠️ الأرقام من الصفقات المسجلة فعلياً فقط، ونتائج الماضي لا تضمن المستقبل.",
-             RISK_WARNING]
+             RISK_WARNING_AR]
     return "\n".join(lines)
 
 async def weekly_report_loop(app):
@@ -3101,7 +3164,7 @@ async def cmd_daily(update,ctx):
             await update.message.reply_text(txt,parse_mode=ParseMode.HTML,link_preview_options=NO_PREVIEW)
             await asyncio.sleep(0.7)
         await update.message.reply_text(f"📊 النتيجة: {len(longs)} LONG + {len(shorts)} SHORT\n\n"
-            f"💡 الصفقات جاهزة للنشر يدوياً\n\n{RISK_WARNING}",parse_mode=ParseMode.HTML)
+            f"💡 الصفقات جاهزة للنشر يدوياً\n\n{RISK_WARNING_AR}",parse_mode=ParseMode.HTML)
     except Exception as e:
         log.exception("daily"); await wait.edit_text(f"⚠️ {str(e)[:200]}")
 
@@ -3387,7 +3450,7 @@ async def cmd_alpha_radar_v2(update,ctx):
         lines+=["━━━━━━━━━━━━━━━━","💡 <b>استراتيجية:</b>",
             "1. هذه العملات جديدة/صغيرة (Web3, DEX, Alpha)",
             "2. ابحث عن الرمز في محفظتك (MetaMask, Trust, إلخ)",
-            "3. استخدم حاسبة المخاطر لتحديد الحجم","",RISK_WARNING,f"👤 {BRAND}"]
+            "3. استخدم حاسبة المخاطر لتحديد الحجم","",RISK_WARNING_AR,f"👤 {BRAND}"]
         await wait.edit_text("\n".join(lines),parse_mode=ParseMode.HTML,link_preview_options=NO_PREVIEW)
     except Exception as e:
         log.exception("alpha_radar_v2")
@@ -3525,7 +3588,7 @@ async def cmd_patterns(update,ctx):
                 em="🟢" if p["bias"]=="bullish" else ("🔴" if p["bias"]=="bearish" else "⚪")
                 lines.append(f"  {em} {p['name']} [{p.get('tf','?').upper()}]")
             lines.append("")
-        lines+=["━━━━━━━━━━━━━━━━",RISK_WARNING]
+        lines+=["━━━━━━━━━━━━━━━━",RISK_WARNING_AR]
         await wait.edit_text("\n".join(lines)[:4000],parse_mode=ParseMode.HTML,link_preview_options=NO_PREVIEW)
     except Exception as e:
         log.exception("patterns_scan")
@@ -4167,12 +4230,12 @@ async def on_text(update,ctx):
             await update.message.reply_text(text_caption, parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
         
         elif tier == "vip":
-            kb=keyboard(sym,res["tf"],tier,"binance_fut")
+            kb=keyboard(sym,res["tf"],tier,"binance_fut",lang)
             img=await asyncio.to_thread(render_chart,res,tier)
             await update.message.reply_photo(photo=img, reply_markup=kb)
             
         elif tier == "admin":
-            kb=keyboard(sym,res["tf"],tier,"binance_fut")
+            kb=keyboard(sym,res["tf"],tier,"binance_fut",lang)
             card=await asyncio.to_thread(render_trade_card,res,tier)
             await update.message.reply_photo(photo=card,reply_markup=kb)
             img=await asyncio.to_thread(render_chart,res,tier)
@@ -4222,7 +4285,7 @@ async def post_init(app):
         asyncio.create_task(whale_hunter_loop(app)),
         asyncio.create_task(weekly_report_loop(app)),asyncio.create_task(trial_notice_loop(app)),
         asyncio.create_task(morning_brief_loop(app))]
-    log.info("ryma v106 | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$15000",
+    log.info("ryma v111 | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$500000",
              MAX_OPEN,CYCLE_GOLDEN,get_golden_config().get("min_score",1),is_multi_exchange(),
              VIP_THRESHOLD,VIP_REWARD_DAYS)
 
