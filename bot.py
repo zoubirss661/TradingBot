@@ -2766,7 +2766,7 @@ def predictive_scan(symbols):
         except Exception: continue
     out.sort(key=lambda x:-x["score"])
     return out[:PREDICT_TOP_N]
-    def simulate(df,sym,tf,start=210):
+def simulate(df,sym,tf,start=210):
     n=len(df); o,h,l,c=(df[k].values for k in ("open","high","low","close"))
     atr,t=df["atr"].values,df["t"].values
     trades,i=[],start; is_meme=sym in MEME_COINS
