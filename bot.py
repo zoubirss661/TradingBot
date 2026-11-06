@@ -1463,7 +1463,7 @@ def analyze(sym):
                 trend_d="up" if views["1d"]["trend"]==1 else "down",
                 sr_high=[], sr_low=[], fibs=[],
                 fut_score=score, fut_details=notes, patterns=patterns)
-    def get_analysis(sym,force=False):
+def get_analysis(sym,force=False):
     if len(_analysis_cache)>300: _analysis_cache.clear()
     hit=_analysis_cache.get(sym)
     if hit and not force and time.time()-hit[0]<60: return hit[1]
