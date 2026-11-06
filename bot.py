@@ -798,7 +798,7 @@ def futures_signal(sym):
                     price=price,oi=oi,fr=fr,ls=ls)
     except Exception: return None
 
-def _futures_score_cache={}
+    _futures_score_cache={}
 def futures_score_for(sym,side):
     key=(sym,side)
     if len(_futures_score_cache)>400: _futures_score_cache.clear()
