@@ -362,11 +362,14 @@ def eng_evaluate(df, htf=None, ltf=None, price=None, i=None, htf_i=None, ltf_i=N
 
 
 # ----------------------------------------------------------------- محاكاة / Backtest
-def eng_simulate(df_raw, htf_raw=None, start=260, cfg=None, fee=0.0008, slip=0.0005, btc_trend=0):
+def eng_simulate(df_raw, htf_raw=None, start=260, cfg=None, fee=0.0008, slip=0.0005, btc_trend=0, prepared=None):
     """Backtest مشي-للأمام: كل قرار يستخدم بيانات حتى الشمعة i فقط (لا تجسس على المستقبل)."""
     cfg = cfg or ENG_CFG
-    d = eng_prepare(df_raw)
-    htf = eng_prepare(htf_raw if htf_raw is not None else eng_resample_daily(df_raw))
+    if prepared is not None:
+        d, htf = prepared
+    else:
+        d = eng_prepare(df_raw)
+        htf = eng_prepare(htf_raw if htf_raw is not None else eng_resample_daily(df_raw))
     n = len(d)
     tfms = int(np.median(np.diff(d["t"].to_numpy()[-200:])))
     htf_close = htf["t"].to_numpy() + 86_400_000
@@ -421,8 +424,12 @@ def eng_simulate(df_raw, htf_raw=None, start=260, cfg=None, fee=0.0008, slip=0.0
             jj = min(j, n - 1)
             realized += remaining * s * (C[jj] - fill) / risk
         cost = 2 * (fee + slip) * fill / risk
+        _adx = d["adx"].iat[i]
         trades.append(dict(t=int(t_arr[i]), side=s, grade=ev["grade"], R=round(realized - cost, 3),
-                           exit=kind, bars=min(j, n - 1) - i, tps=sum(t["hit"] for t in tps)))
+                           exit=kind, bars=min(j, n - 1) - i, tps=sum(t["hit"] for t in tps),
+                           cost=round(float(cost), 4), score=ev["score"],
+                           adx=float(_adx) if _adx == _adx else 0.0,
+                           sl_atr=round(risk / lv["atr"], 2), rr1=ev["rr"][0]))
         i = min(j, n - 1) + 1
     return trades
 
@@ -488,6 +495,7 @@ PAYMENT_INFO = _e("PAYMENT_INFO", "Binance Pay: 905142395")
 PROTECT = _e("PROTECT_CONTENT", "1") == "1"
 MAINTENANCE = _e("MAINTENANCE", "0") == "1"
 BRAND = "💎 Ryma Crypto 💎"
+BOT_VERSION = "diag-1 · 2026-11-07"
 WHALE_MIN_USD = 500000
 
 RISK_WARNING_AR = "⚠️ <i>التداول ينطوي على مخاطر عالية. يرجى إدارة رأس المال بذكاء. ليست نصيحة مالية.</i>"
@@ -3851,7 +3859,7 @@ def bt_report(per,tmin,tmax,label):
     cut=tmin+0.65*(tmax-tmin)
     tr=[x for x in allt if x["t"]<cut]; te=[x for x in allt if x["t"]>=cut]
     mt,me=metrics(tr),metrics(te)
-    lines=[f"📊 Backtest {label} ({len(per)} عملة)","",
+    lines=[f"📊 Backtest {label} ({len(per)} عملة) · {BOT_VERSION}","",
         f"📈 TRAIN: n={mt['n']} | WR {mt['wr']}% | PF {mt['pf']} | {mt['total']:+}R",
         f"📊 TEST : n={me['n']} | WR {me['wr']}% | PF {me['pf']} | {me['total']:+}R",
         f"🎯 وصول TP1: {me['tp1']}%",""]
@@ -4588,6 +4596,134 @@ async def cmd_bt(update,ctx):
     text,_=bt_report(per,a,b,arg)
     await wait.edit_text(text[:4000],link_preview_options=NO_PREVIEW)
 
+# ======================= تشخيص الباك تست (/btdiag) =======================
+_BT_DATA={"ts":0.0,"years":0.0,"syms":[],"d":{}}   # sym -> (raw, d محضّر, htf محضّر)
+_BT_BUSY=[False]
+
+def bt_load(sym,years):
+    need=int(years*6*365)+300
+    rows=binance_futures_klines_long(sym,"4h",need)
+    if rows and len(rows)>=400: df=_rows_to_df(rows,"4h",need)
+    else: df=get_candles(sym,"4h",need,ttl=900)
+    if len(df)<400: return None
+    raw=df[["t","open","high","low","close","volume"]].reset_index(drop=True)
+    return raw,eng_prepare(raw),eng_prepare(eng_resample_daily(raw))
+
+def bt_prepare_all(syms,years):
+    c=_BT_DATA
+    if c["d"] and c["syms"]==list(syms) and c["years"]==years and time.time()-c["ts"]<1800: return c["d"]
+    out={}
+    for sy in syms:
+        try:
+            r=bt_load(sy,years)
+            if r: out[sy]=r
+        except Exception as _ex: log.debug('ignored: %s',_ex)
+    c.update(ts=time.time(),years=years,syms=list(syms),d=out); return out
+
+def bt_run(data,cfg=None):
+    trades,tmin,tmax=[],None,None
+    for sy,(raw,d,htf) in data.items():
+        try: trs=eng_simulate(raw,None,start=260,cfg=cfg,prepared=(d,htf))
+        except Exception as _ex: log.debug('ignored: %s',_ex); continue
+        for x in trs: x["sym"]=sy
+        trades+=trs
+        a,b=int(raw["t"].iloc[260]),int(raw["t"].iloc[-1])
+        tmin=a if tmin is None else min(tmin,a); tmax=b if tmax is None else max(tmax,b)
+    return trades,tmin,tmax
+
+def _bt_split(trades,tmin,tmax):
+    cut=tmin+0.65*(tmax-tmin)   # نفس تقسيم bt_report
+    return [x for x in trades if x["t"]<cut],[x for x in trades if x["t"]>=cut]
+
+def _bt_line(name,trs):
+    if not trs: return f"{name}: —"
+    m=metrics(trs); return f"{name}: n={m['n']} | WR {m['wr']}% | PF {m['pf']} | {m['total']:+}R"
+
+def _bt_group(title,trades,buckets):
+    out=[title]
+    for name,fn in buckets:
+        sub=[x for x in trades if fn(x)]
+        if sub: out.append("  "+_bt_line(name,sub))
+    return out
+
+def bt_breakdown(trades,tmin,tmax,nsym):
+    tr,te=_bt_split(trades,tmin,tmax); n=len(trades)
+    cost=sum(x.get("cost",0) for x in trades); net=sum(x["R"] for x in trades)
+    L=[f"🔬 تشخيص الباك تست · {BOT_VERSION}",f"{nsym} عملة | {n} صفقة","",
+       _bt_line("TRAIN",tr),_bt_line("TEST ",te),_bt_line("الكل ",trades),
+       f"💸 رسوم+انزلاق: {-cost:+.1f}R | قبلها: {net+cost:+.1f}R | متوسط/صفقة: {net/n:+.3f}R",
+       "🎯 وصول الأهداف: "+" | ".join(f"TP{k} {100*sum(1 for x in trades if x.get('tps',0)>=k)/n:.0f}%" for k in (1,2,3,4)),
+       ""]
+    L+=_bt_group("🚪 نوع الخروج",trades,[(k,(lambda x,k=k:x["exit"]==k)) for k in ("SL","BE","TRAIL","TP","TIME")])
+    L+=[""]+_bt_group("↕️ الاتجاه",trades,[("شراء",lambda x:x["side"]==1),("بيع",lambda x:x["side"]==-1)])
+    L+=[""]+_bt_group("🏅 الدرجة",trades,[(g,(lambda x,g=g:x["grade"]==g)) for g in ("A+","A","B")])
+    p1=[]
+    L+=[""]+_bt_group("📈 قوة الترند ADX",trades,[("ADX<22",lambda x:x.get("adx",0)<22),
+        ("22–30",lambda x:22<=x.get("adx",0)<30),("ADX≥30",lambda x:x.get("adx",0)>=30)])
+    p2=_bt_group("📏 بعد الوقف (ATR)",trades,[("<1.5",lambda x:x.get("sl_atr",0)<1.5),
+        ("1.5–2.2",lambda x:1.5<=x.get("sl_atr",0)<2.2),("≥2.2",lambda x:x.get("sl_atr",0)>=2.2)])
+    p2+=[""]+_bt_group("🎯 مسافة TP1 (R)",trades,[("<1.5R",lambda x:x.get("rr1",0)<1.5),
+        ("1.5–2.5R",lambda x:1.5<=x.get("rr1",0)<2.5),("≥2.5R",lambda x:x.get("rr1",0)>=2.5)])
+    yrs=sorted({dt.datetime.fromtimestamp(x["t"]/1000,dt.timezone.utc).year for x in trades})
+    p2+=[""]+_bt_group("📅 السنة",trades,[(str(y),(lambda x,y=y:dt.datetime.fromtimestamp(x["t"]/1000,dt.timezone.utc).year==y)) for y in yrs])
+    per={}
+    for x in trades: per.setdefault(x["sym"],[]).append(x["R"])
+    rk=sorted(per.items(),key=lambda kv:-sum(kv[1]))
+    p2+=["","🏆 أفضل 5 عملات: "+" | ".join(f"{k} {sum(v):+.1f}R" for k,v in rk[:5]),
+         "📉 أسوأ 5 عملات: "+" | ".join(f"{k} {sum(v):+.1f}R" for k,v in rk[-5:])]
+    return ["\n".join(L),"\n".join(p2)]
+
+def bt_grid_one(data,ms,adx,sl):
+    cfg=dict(ENG_CFG,min_score=ms,min_adx=adx,max_sl_atr=sl)
+    trs,a,b=bt_run(data,cfg)
+    if not trs: return dict(ms=ms,adx=adx,sl=sl,tr=metrics([]),te=metrics([]))
+    tr,te=_bt_split(trs,a,b); return dict(ms=ms,adx=adx,sl=sl,tr=metrics(tr),te=metrics(te))
+
+BT_GRID=[(ms,adx,sl) for ms in (6.5,8.0) for adx in (18,25) for sl in (2.0,2.8)]
+
+def bt_grid_text(rows,total):
+    L=[f"🧪 جدول الإعدادات ({len(rows)}/{total}) · {BOT_VERSION}","score/ADX/SL  |  TRAIN n·PF·R  |  TEST n·PF·R"]
+    for r in rows:
+        L.append(f"{r['ms']}/{r['adx']}/{r['sl']}  |  {r['tr']['n']}·{r['tr']['pf']}·{r['tr']['total']:+}  |  {r['te']['n']}·{r['te']['pf']}·{r['te']['total']:+}")
+    ok=[r for r in rows if r["tr"]["n"]>=60]
+    if len(rows)==total and ok:
+        b=max(ok,key=lambda r:r["tr"]["pf"])
+        L+=["",f"المختار على TRAIN فقط: score {b['ms']} | ADX {b['adx']} | SL {b['sl']}",
+            f"→ TEST: n={b['te']['n']} | PF {b['te']['pf']} | {b['te']['total']:+}R",
+            "⚠️ الحكم النهائي على TEST. إذا PF<1 هناك فلا ميزة، والضبط وحده ما نفع."]
+    return "\n".join(L)
+
+@admin_only
+async def cmd_btdiag(update,ctx):
+    """/btdiag [سنوات] [grid]  — تفصيل الخسارة، و grid لجدول إعدادات (أبطأ)."""
+    if _BT_BUSY[0]:
+        await update.message.reply_text("⏳ تشخيص آخر قيد التشغيل، انتظر"); return
+    grid=any(a.lower()=="grid" for a in ctx.args); years=3.0
+    for a in ctx.args:
+        try: years=float(a)
+        except ValueError: pass
+    _BT_BUSY[0]=True
+    try:
+        wait=await update.message.reply_text(f"⏳ تشخيص {BOT_VERSION}: جلب بيانات Top 50 ({years:g} سنة)... قد يأخذ عدة دقائق")
+        syms=await asyncio.to_thread(top_symbols,50)
+        data=await asyncio.to_thread(bt_prepare_all,syms,years)
+        if not data: await wait.edit_text("❌ لا توجد بيانات"); return
+        await wait.edit_text(f"⏳ تشغيل الباك تست على {len(data)} عملة...")
+        trades,a,b=await asyncio.to_thread(bt_run,data,None)
+        if not trades: await wait.edit_text("❌ لا صفقات"); return
+        parts=bt_breakdown(trades,a,b,len(data))
+        await wait.edit_text(parts[0][:4000],link_preview_options=NO_PREVIEW)
+        await update.message.reply_text(parts[1][:4000],link_preview_options=NO_PREVIEW)
+        if grid:
+            msg=await update.message.reply_text(f"🧪 الجدول 0/{len(BT_GRID)}...")
+            rows=[]
+            for ms,adx,sl in BT_GRID:
+                rows.append(await asyncio.to_thread(bt_grid_one,data,ms,adx,sl))
+                try: await msg.edit_text(bt_grid_text(rows,len(BT_GRID))[:4000])
+                except Exception as _ex: log.debug('ignored: %s',_ex)
+    finally:
+        _BT_BUSY[0]=False
+
 @admin_only
 async def cmd_bt50(update,ctx):
     try: years=float(ctx.args[0]) if ctx.args else 3.0
@@ -5156,7 +5292,7 @@ async def cmd_botinfo(update,ctx):
     if update.effective_user.id!=ADMIN_ID: return
     w=await ctx.bot.get_webhook_info()
     await update.message.reply_text(
-        f"webhook: {w.url or 'لا يوجد ✅'}\nallowed_updates: {w.allowed_updates or 'الافتراضي ✅'}\n"
+        f"version: {BOT_VERSION}\nwebhook: {w.url or 'لا يوجد ✅'}\nallowed_updates: {w.allowed_updates or 'الافتراضي ✅'}\n"
         f"pending: {w.pending_update_count}\nlast_error: {w.last_error_message or '-'}")
 
 async def on_text(update,ctx):
@@ -5334,6 +5470,7 @@ async def post_init(app):
         asyncio.create_task(whale_hunter_loop(app)),
         asyncio.create_task(weekly_report_loop(app)),asyncio.create_task(trial_notice_loop(app)),
         asyncio.create_task(morning_brief_loop(app))]
+    log.info("version %s",BOT_VERSION)
     log.info("ryma FINAL (engine+always-trade) | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$500000 | SL≤2.5%% | RR≥1.5 | hype=admin | neon=admin | patterns_chart=admin",
              MAX_OPEN,CYCLE_GOLDEN,get_golden_config().get("min_score",1),is_multi_exchange(),
              VIP_THRESHOLD,VIP_REWARD_DAYS)
@@ -5365,7 +5502,7 @@ def main():
         ("portfolio",cmd_portfolio),("alpha_v2",cmd_alpha_radar_v2),
         ("patterns",cmd_patterns),("neon",cmd_neon),
         ("points",cmd_points),("myref",cmd_myref),("addpoints",cmd_addpoints),
-        ("fear",cmd_fear),("market",cmd_market),("top",cmd_top),("tools",cmd_tools),("risk",cmd_riskcalc)]
+        ("btdiag",cmd_btdiag),("fear",cmd_fear),("market",cmd_market),("top",cmd_top),("tools",cmd_tools),("risk",cmd_riskcalc)]
     for name,fn in handlers: app.add_handler(CommandHandler(name,fn))
     app.add_handler(TypeHandler(Update,log_updates),group=-1)
     app.add_handler(CommandHandler("botinfo",cmd_botinfo))
