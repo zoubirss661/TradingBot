@@ -3,6 +3,446 @@ import datetime as dt
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np, pandas as pd, requests, ccxt, matplotlib
 import urllib.parse, concurrent.futures
+import types as _types
+# ===================== محرك الإشارات الدقيق (مدمج) =====================
+# اتجاه يومي+4س، وقف هيكلي، أهداف من مستويات حقيقية، لا مطاردة، بدون repaint.
+ENG_TP_FRACS = [0.50, 0.25, 0.15, 0.10]
+
+ENG_CFG = dict(
+    min_score=6.5,        # أقل نتيجة لقبول الصفقة (B)
+    grade_a=8.0,
+    grade_aplus=10.0,
+    min_adx=18.0,         # أقل من هذا = سوق عرضي
+    max_ext_atr=2.2,      # أقصى بعد عن EMA20 عند الدخول (لا مطاردة)
+    rsi_long_max=72.0,
+    rsi_short_min=28.0,
+    min_sl_atr=1.0,
+    max_sl_atr=2.8,
+    sl_buffer_atr=0.25,
+    min_rr_tp1=1.2,       # أقل مسافة للهدف الأول بوحدات R
+    max_tp_atr=7.0,       # سقف بعد أي هدف
+    pivot_w=3,
+    pivot_lb_entry=150,
+    pivot_lb_htf=120,
+    swing_lb=40,
+    be_offset_r=0.05,     # نقطة التعادل = الدخول + 0.05R (تغطي الرسوم)
+    trail_atr=3.0,
+    max_hold=60,
+)
+
+
+# ----------------------------------------------------------------- مؤشرات
+def _eng_wilder(s, n):
+    return s.ewm(alpha=1.0 / n, adjust=False, min_periods=n).mean()
+
+
+def eng_prepare(df):
+    """يحسب كل المؤشرات من الصفر (سببية: لا تنظر للمستقبل)."""
+    df = df.copy().reset_index(drop=True)
+    c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
+    for n in (20, 50, 200):
+        df[f"ema{n}"] = c.ewm(span=n, adjust=False, min_periods=n).mean()
+    pc = c.shift()
+    tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    df["atr"] = _eng_wilder(tr, 14)
+    d = c.diff()
+    up, dn = _eng_wilder(d.clip(lower=0), 14), _eng_wilder((-d).clip(lower=0), 14)
+    rs = up / dn.replace(0, np.nan)
+    rsi = 100 - 100 / (1 + rs)
+    rsi[(dn == 0) & up.notna()] = 100.0
+    df["rsi"] = rsi
+    macd = c.ewm(span=12, adjust=False, min_periods=12).mean() - c.ewm(span=26, adjust=False, min_periods=26).mean()
+    df["macd_hist"] = macd - macd.ewm(span=9, adjust=False, min_periods=9).mean()
+    df["rvol"] = v / v.shift(1).rolling(20).mean().replace(0, np.nan)
+    # ADX
+    upm, dnm = h.diff(), -l.diff()
+    pdm = pd.Series(np.where((upm > dnm) & (upm > 0), upm, 0.0), index=df.index)
+    mdm = pd.Series(np.where((dnm > upm) & (dnm > 0), dnm, 0.0), index=df.index)
+    atr14 = _eng_wilder(tr, 14).replace(0, np.nan)
+    pdi, mdi = 100 * _eng_wilder(pdm, 14) / atr14, 100 * _eng_wilder(mdm, 14) / atr14
+    dx = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, np.nan)
+    df["pdi"], df["mdi"], df["adx"] = pdi, mdi, _eng_wilder(dx, 14)
+    return df
+
+
+def eng_resample_daily(df):
+    """4س -> يومي (أيام مكتملة فقط). df فيه t(ms) open high low close volume."""
+    day = (df["t"] // 86_400_000).astype("int64")
+    g = df.groupby(day, sort=True)
+    out = g.agg(t=("t", "first"), open=("open", "first"), high=("high", "max"),
+                low=("low", "min"), close=("close", "last"), volume=("volume", "sum"),
+                n=("t", "count"))
+    full = out["n"].max()
+    out = out[out["n"] == full].drop(columns="n").reset_index(drop=True)
+    out["t"] = (out["t"] // 86_400_000) * 86_400_000
+    return out
+
+
+def eng_trend_state(df, i):
+    """-2 هابط قوي، -1 هابط، 0 عرضي، 1 صاعد، 2 صاعد قوي."""
+    if df is None or i is None or i < 55:
+        return 0
+    c = float(df["close"].iat[i])
+    e20, e50, e200 = (float(df[k].iat[i]) for k in ("ema20", "ema50", "ema200"))
+    if np.isnan(e20) or np.isnan(e50):
+        return 0
+    slope = e50 - float(df["ema50"].iat[i - 5])
+    has200 = not np.isnan(e200)
+    if e20 > e50 and c > e50 and slope > 0:
+        return 2 if (has200 and e50 > e200 and c > e200) else 1
+    if e20 < e50 and c < e50 and slope < 0:
+        return -2 if (has200 and e50 < e200 and c < e200) else -1
+    return 0
+
+
+def eng_find_pivots(df, i, lookback, w):
+    """قمم/قيعان مؤكدة (w شموع من كل جهة). ترجع قائمتين من (index, price)."""
+    H, L = df["high"].to_numpy(), df["low"].to_numpy()
+    lo, hi = max(w, i - lookback), i - w
+    highs, lows = [], []
+    for k in range(lo, hi + 1):
+        if H[k] >= H[k - w:k + w + 1].max():
+            highs.append((k, float(H[k])))
+        if L[k] <= L[k - w:k + w + 1].min():
+            lows.append((k, float(L[k])))
+    return highs, lows
+
+
+def eng_cluster(levels, tol):
+    if not levels:
+        return []
+    levels = sorted(levels)
+    out, cur = [], [levels[0]]
+    for x in levels[1:]:
+        if x - np.mean(cur) <= tol:
+            cur.append(x)
+        else:
+            out.append(float(np.mean(cur)))
+            cur = [x]
+    out.append(float(np.mean(cur)))
+    return out
+
+
+# ----------------------------------------------------------------- مستويات الصفقة
+def eng_build_levels(df, i, side, price, atr, htf=None, htf_i=None, cfg=ENG_CFG):
+    """يرجع (lv, reason). lv=None إذا كانت الصفقة غير مجدية (reason يشرح السبب)."""
+    w = cfg["pivot_w"]
+    H, L = df["high"].to_numpy(), df["low"].to_numpy()
+    highs, lows = eng_find_pivots(df, i, cfg["swing_lb"], w)
+
+    # ---- وقف الخسارة الهيكلي
+    buf = cfg["sl_buffer_atr"] * atr
+    if side == 1:
+        cands = [(k, p) for k, p in lows if price - p >= 0.6 * atr]
+        swing = max((p for k, p in cands), default=None)  # أقرب قاع صالح
+        if swing is None:
+            swing = float(L[max(0, i - 11):i + 1].min())
+        sl = swing - buf
+        dist = price - sl
+    else:
+        cands = [(k, p) for k, p in highs if p - price >= 0.6 * atr]
+        swing = min((p for k, p in cands), default=None)
+        if swing is None:
+            swing = float(H[max(0, i - 11):i + 1].max())
+        sl = swing + buf
+        dist = sl - price
+    if dist > cfg["max_sl_atr"] * atr:
+        return None, "الوقف الهيكلي بعيد (%.1f ATR) — المخاطرة كبيرة" % (dist / atr)
+    if dist < cfg["min_sl_atr"] * atr:
+        dist = cfg["min_sl_atr"] * atr
+        sl = price - side * dist
+    risk = dist
+
+    # ---- مستويات الأهداف (قمم/قيعان 4س + يومي)
+    ph, pl = eng_find_pivots(df, i, cfg["pivot_lb_entry"], w)
+    pool = [p for _, p in (ph if side == 1 else pl)]
+    if htf is not None and htf_i is not None and htf_i > 10:
+        hh, hl = eng_find_pivots(htf, htf_i, cfg["pivot_lb_htf"], w)
+        pool += [p for _, p in (hh if side == 1 else hl)]
+    if side == 1:
+        pool = [p for p in pool if p > price + 0.5 * atr]
+    else:
+        pool = [p for p in pool if p < price - 0.5 * atr]
+    levels = eng_cluster(pool, 0.4 * atr)
+    levels = sorted(levels) if side == 1 else sorted(levels, reverse=True)
+
+    if levels:
+        d1 = abs(levels[0] - price)
+        if d1 < cfg["min_rr_tp1"] * risk:
+            kind = "مقاومة" if side == 1 else "دعم"
+            return None, "%s قريبة (%.2f ATR) — لا توجد مساحة كافية للصفقة" % (kind, d1 / atr)
+
+    cap = cfg["max_tp_atr"] * atr
+    targets, srcs = [], []
+    for lv_px in levels:
+        px = lv_px - side * 0.1 * atr           # نخرج قبل المستوى بقليل
+        d = abs(px - price)
+        if d < cfg["min_rr_tp1"] * risk or d > cap:
+            continue
+        if targets and abs(px - targets[-1]) < 0.5 * risk:
+            continue
+        targets.append(px)
+        srcs.append("level")
+        if len(targets) == 4:
+            break
+    for m in (1.5, 2.5, 3.5, 5.0, 6.5):
+        if len(targets) >= 4:
+            break
+        px = price + side * risk * m
+        if abs(px - price) > cap:
+            break
+        if not targets or abs(px - price) >= abs(targets[-1] - price) + 0.5 * risk:
+            targets.append(px)
+            srcs.append("R")
+    step = max(0.5 * risk, 0.35 * atr)
+    while len(targets) < 4:
+        base = targets[-1] if targets else price + side * cfg["min_rr_tp1"] * risk
+        targets.append(base + side * step)
+        srcs.append("R")
+    fixed, last = [], price
+    for px in targets:                          # ترتيب تصاعدي صارم بمسافة دنيا
+        if abs(px - price) < abs(last - price) + 0.35 * atr:
+            px = price + side * (abs(last - price) + 0.35 * atr)
+        fixed.append(px)
+        last = px
+    tps = [dict(px=float(px), pct=round(100 * side * (px - price) / price, 2),
+                frac=ENG_TP_FRACS[k], hit=False, src=srcs[k]) for k, px in enumerate(fixed)]
+    lv = dict(entry=float(price), sl=float(sl), risk=float(risk), tps=tps, atr=float(atr))
+    return lv, ""
+
+
+# ----------------------------------------------------------------- القرار
+def _eng_sgn(x):
+    return 1 if x > 0 else (-1 if x < 0 else 0)
+
+
+def eng_evaluate(df, htf=None, ltf=None, price=None, i=None, htf_i=None, ltf_i=None,
+             fut_score=0, btc_trend=0, patterns=None, cfg=None, force_side=None):
+    """
+    df: شموع إطار الدخول (4س) بعد eng_prepare(). htf: اليومي. ltf: ساعة (اختياري).
+    يرجع dict: status (LONG/SHORT/WAIT) + score + grade + lv + reasons + wait_reasons.
+    """
+    cfg = cfg or ENG_CFG
+    i = len(df) - 1 if i is None else i
+    if htf is not None and htf_i is None:
+        htf_i = len(htf) - 1
+    if ltf is not None and ltf_i is None:
+        ltf_i = len(ltf) - 1
+    res = dict(status="WAIT", side=0, score=0.0, grade="WAIT", confidence=0, lv=None,
+               reasons=[], warnings=[], wait_reasons=[], watch=None)
+
+    def wait(msg):
+        res["wait_reasons"].append(msg)
+        return res
+
+    if i < 60:
+        return wait("بيانات غير كافية")
+    atr = float(df["atr"].iat[i])
+    close = float(df["close"].iat[i])
+    price = float(price) if price else close
+    if np.isnan(atr) or atr <= 0:
+        return wait("ATR غير متاح")
+
+    etf = eng_trend_state(df, i)
+    htf_t = eng_trend_state(htf, htf_i) if htf is not None else 0
+    ltf_t = eng_trend_state(ltf, ltf_i) if ltf is not None else 0
+    res["trends"] = dict(d1=htf_t, h4=etf, h1=ltf_t)
+
+    side = force_side if force_side else _eng_sgn(etf)
+    if side == 0:
+        return wait("السوق عرضي على إطار 4 ساعات")
+    if etf * side <= 0:
+        return wait("اتجاه 4س لا يدعم الاتجاه المطلوب")
+    if htf is not None and htf_t * side < 0:
+        return wait("الصفقة عكس الاتجاه اليومي")
+    if htf is not None and htf_t == 0 and abs(etf) < 2:
+        return wait("اليومي محايد واتجاه 4س ضعيف")
+
+    adx = float(df["adx"].iat[i]) if not np.isnan(df["adx"].iat[i]) else 0.0
+    rsi = float(df["rsi"].iat[i]) if not np.isnan(df["rsi"].iat[i]) else 50.0
+    if adx < cfg["min_adx"]:
+        return wait("سوق عرضي (ADX %.0f أقل من %d)" % (adx, cfg["min_adx"]))
+    if side == 1 and rsi > cfg["rsi_long_max"]:
+        return wait("RSI %.0f تشبع شراء — لا تشتري القمة" % rsi)
+    if side == -1 and rsi < cfg["rsi_short_min"]:
+        return wait("RSI %.0f تشبع بيع — لا تبيع القاع" % rsi)
+
+    ema20 = float(df["ema20"].iat[i])
+    ext = side * (price - ema20) / atr
+    if ext > cfg["max_ext_atr"]:
+        res["watch"] = float(ema20 + side * 0.3 * atr)
+        return wait("السعر بعيد عن EMA20 (%.1f ATR) — انتظر ارتداداً قرب %.6g" % (ext, res["watch"]))
+
+    # ---- النقاط
+    score = 0.0
+    why = res["reasons"]
+    score += abs(htf_t) if htf is not None else 1.0
+    score += abs(etf)
+    why.append("اتجاه يومي %s / 4س %s" % ("متوافق" if htf_t * side > 0 else "محايد",
+                                          "قوي" if abs(etf) == 2 else "متوافق"))
+    if ltf is not None:
+        score += 0.5 * ltf_t * side
+        if ltf_t * side < 0:
+            res["warnings"].append("إطار الساعة عكس الصفقة (دخول مبكر)")
+
+    mh = float(df["macd_hist"].iat[i]) if not np.isnan(df["macd_hist"].iat[i]) else 0.0
+    mh_prev = float(df["macd_hist"].iat[i - 1]) if not np.isnan(df["macd_hist"].iat[i - 1]) else 0.0
+    if mh * side > 0 and side * (mh - mh_prev) > 0:
+        score += 1.0
+        why.append("زخم MACD متزايد")
+    elif mh * side > 0:
+        score += 0.5
+    else:
+        score -= 1.0
+        res["warnings"].append("زخم MACD ضد الصفقة")
+
+    if adx >= 25:
+        score += 1.0
+        why.append("ترند قوي (ADX %.0f)" % adx)
+    else:
+        score += 0.5
+
+    good_lo, good_hi = (42, 65) if side == 1 else (35, 58)
+    if good_lo <= rsi <= good_hi:
+        score += 1.0
+        why.append("RSI صحي %.0f" % rsi)
+    else:
+        score += 0.3
+
+    rv = float(df["rvol"].iat[i]) if not np.isnan(df["rvol"].iat[i]) else 1.0
+    if rv >= 1.2:
+        score += 1.0
+        why.append("حجم أعلى من المتوسط ×%.1f" % rv)
+    elif rv >= 0.9:
+        score += 0.3
+    elif rv < 0.7:
+        score -= 1.0
+        res["warnings"].append("حجم ضعيف ×%.1f" % rv)
+
+    if -1.0 <= ext <= 1.5:
+        score += 1.0
+        why.append("دخول قريب من المتوسط (ليس مطاردة)")
+    elif ext < -1.0:
+        score -= 0.5
+
+    score += max(-1.5, min(1.5, 0.5 * fut_score))
+    if fut_score >= 2:
+        why.append("بيانات الفيوتشر تدعم الاتجاه")
+    elif fut_score <= -2:
+        res["warnings"].append("بيانات الفيوتشر ضد الاتجاه")
+
+    if patterns:
+        for p in patterns:
+            b = p.get("bias")
+            if (b == "bullish" and side == 1) or (b == "bearish" and side == -1):
+                score += 1.0
+                why.append("نموذج %s يدعم الصفقة" % p.get("name", ""))
+            elif b in ("bullish", "bearish"):
+                score -= 1.5
+                res["warnings"].append("نموذج %s عكس الصفقة" % p.get("name", ""))
+    if btc_trend * side < 0:
+        score -= 1.0
+        res["warnings"].append("البيتكوين عكس اتجاه الصفقة")
+    elif btc_trend * side > 0:
+        score += 0.5
+
+    res["score"] = round(score, 2)
+    if score < cfg["min_score"]:
+        return wait("جودة الإعداد غير كافية (%.1f من %.1f)" % (score, cfg["min_score"]))
+
+    lv, why_not = eng_build_levels(df, i, side, price, atr, htf, htf_i, cfg)
+    if lv is None:
+        return wait(why_not)
+
+    grade = "A+" if score >= cfg["grade_aplus"] else ("A" if score >= cfg["grade_a"] else "B")
+    res.update(status="LONG" if side == 1 else "SHORT", side=side, grade=grade, lv=lv,
+               confidence=int(min(95, 35 + score * 4.5)))
+    res["rr"] = [round(abs(t["px"] - price) / lv["risk"], 2) for t in lv["tps"]]
+    return res
+
+
+# ----------------------------------------------------------------- محاكاة / Backtest
+def eng_simulate(df_raw, htf_raw=None, start=260, cfg=None, fee=0.0008, slip=0.0005, btc_trend=0):
+    """Backtest مشي-للأمام: كل قرار يستخدم بيانات حتى الشمعة i فقط (لا تجسس على المستقبل)."""
+    cfg = cfg or ENG_CFG
+    d = eng_prepare(df_raw)
+    htf = eng_prepare(htf_raw if htf_raw is not None else eng_resample_daily(df_raw))
+    n = len(d)
+    tfms = int(np.median(np.diff(d["t"].to_numpy()[-200:])))
+    htf_close = htf["t"].to_numpy() + 86_400_000
+    t_arr = d["t"].to_numpy()
+    O, H, L, C, A = (d[k].to_numpy() for k in ("open", "high", "low", "close", "atr"))
+    trades, i = [], start
+    while i < n - 1:
+        hi = int(np.searchsorted(htf_close, t_arr[i] + tfms, side="right") - 1)
+        ev = eng_evaluate(d, htf, price=C[i], i=i, htf_i=hi, btc_trend=btc_trend, cfg=cfg)
+        if ev["status"] == "WAIT":
+            i += 1
+            continue
+        lv, s = ev["lv"], ev["side"]
+        fill, risk, sl = lv["entry"], lv["risk"], lv["sl"]
+        tps = [dict(t) for t in lv["tps"]]
+        remaining, realized, be, trail, ext = 1.0, 0.0, False, False, fill
+        kind, j = "TIME", i + 1
+        while j < n:
+            h, l = H[j], L[j]
+            if (s == 1 and l <= sl) or (s == -1 and h >= sl):
+                realized += remaining * s * (sl - fill) / risk
+                kind = "TRAIL" if trail else ("BE" if be else "SL")
+                remaining = 0.0
+                break
+            for t in tps:
+                if t["hit"]:
+                    continue
+                if not ((s == 1 and h >= t["px"]) or (s == -1 and l <= t["px"])):
+                    break
+                t["hit"] = True
+                realized += t["frac"] * s * (t["px"] - fill) / risk
+                remaining -= t["frac"]
+            if remaining <= 1e-9:
+                kind, remaining = "TP", 0.0
+                break
+            if tps[0]["hit"] and not be:
+                sl = max(sl, fill + cfg["be_offset_r"] * risk) if s == 1 else min(sl, fill - cfg["be_offset_r"] * risk)
+                be = True
+            ext = max(ext, h) if s == 1 else min(ext, l)
+            if sum(t["hit"] for t in tps) >= 2:
+                trail = True
+                a = A[j]
+                if a == a and a > 0:
+                    nsl = ext - s * cfg["trail_atr"] * a
+                    sl = max(sl, nsl) if s == 1 else min(sl, nsl)
+            if j - i >= cfg["max_hold"]:
+                realized += remaining * s * (C[j] - fill) / risk
+                remaining = 0.0
+                break
+            j += 1
+        if remaining > 1e-9:
+            jj = min(j, n - 1)
+            realized += remaining * s * (C[jj] - fill) / risk
+        cost = 2 * (fee + slip) * fill / risk
+        trades.append(dict(t=int(t_arr[i]), side=s, grade=ev["grade"], R=round(realized - cost, 3),
+                           exit=kind, bars=min(j, n - 1) - i, tps=sum(t["hit"] for t in tps)))
+        i = min(j, n - 1) + 1
+    return trades
+
+
+def eng_metrics(trades):
+    if not trades:
+        return dict(n=0, wr=0.0, pf=0.0, total=0.0, avg=0.0, dd=0.0, tp1=0.0)
+    R = np.array([x["R"] for x in sorted(trades, key=lambda z: z["t"])], dtype=float)
+    g, l = R[R > 0].sum(), -R[R <= 0].sum()
+    eq = np.cumsum(R)
+    return dict(n=len(R), wr=round(100 * float((R > 0).mean()), 1),
+                pf=round(float(g / l), 2) if l > 0 else 999.0,
+                total=round(float(R.sum()), 1), avg=round(float(R.mean()), 3),
+                dd=round(float((np.maximum.accumulate(eq) - eq).max()), 1),
+                tp1=round(100 * float(np.mean([x["tps"] >= 1 for x in trades])), 1))
+
+se=_types.SimpleNamespace(prepare=eng_prepare,resample_daily=eng_resample_daily,trend_state=eng_trend_state,
+                          build_levels=eng_build_levels,evaluate=eng_evaluate,simulate=eng_simulate,
+                          metrics=eng_metrics,CFG=ENG_CFG,TP_FRACS=ENG_TP_FRACS)
+# ====================================================================
 matplotlib.use("Agg")
 matplotlib.rcParams["font.family"] = ["DejaVu Sans", "Noto Naskh Arabic", "Amiri", "sans-serif"]
 from matplotlib.figure import Figure
@@ -20,7 +460,7 @@ from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
                       BotCommand, LinkPreviewOptions, CopyTextButton)
 from telegram.constants import ParseMode
 from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
-                          ContextTypes, filters, CallbackQueryHandler)
+                          ContextTypes, filters, CallbackQueryHandler, TypeHandler)
 
 def _e(k, d=""): return (os.getenv(k, d) or d).strip()
 def _int(k, d=0):
@@ -146,7 +586,7 @@ PIVOT_WINDOW=100; PIVOT_LOOKBACK=3; MIN_PIVOT_DIST=0.5
 CORE_SL_MAX=2.5; CORE_SL_MIN=1.5
 MAX_TP_ATR = 6.0; MIN_RR_TP1 = 1.5
 CORE_TP_FRACS=[0.50,0.25,0.15,0.10]
-BE_TRIGGER_R=0.1; TRAIL_ATR=3.0; MAX_HOLD=60
+BE_OFFSET_R=0.05; TRAIL_ATR=3.0; MAX_HOLD=60
 CORE_VOL_MULT=0.7; CORE_RSI_LONG=(35,70); CORE_RSI_SHORT=(50,80); EXT_MAX_ATR=3.5
 MIN_DAILY_VOLUME_USD=5_000_000; VIP_MIN_LIQUIDITY=3_000_000; REQUIRE_MTF_FOR_SMALL=True
 MEME_TP_PCTS=[3.0,6.0,10.0,15.0]; MEME_TP_FRACS=[0.50,0.25,0.15,0.10]
@@ -166,6 +606,8 @@ CROSS_EXCLUDE={"BTC","ETH","BNB"}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("ryma")
+# httpx يطبع رابط كل طلب وفيه التوكن كاملاً: نخفضه حتى لا يتسرب التوكن في الـlogs ولتقليل الضجيج
+for _n in ("httpx","httpcore","telegram.ext.Updater"): logging.getLogger(_n).setLevel(logging.WARNING)
 START_TS = time.time(); DAY = 86400
 def now_s(): return int(time.time())
 
@@ -275,7 +717,7 @@ TEXTS = {
         "welcome": "أهلاً {name}! 👋\n\nمرحباً بك في بوت **Ryma Crypto** للتحليل الفني الذكي.\n\n📌 **طريقة الاستخدام:**\nفقط أرسل اسم أي عملة (مثل BTC أو ETH) وسأقوم بتحليلها فوراً وتزويدك بـ:\n- نقاط الدخول والخروج.\n- 4 أهداف ذكية.\n- وقف الخسارة المناسب.\n- النماذج الفنية.\n\n📊 الأزرار بالأسفل تتيح لك الوصول السريع لحاسبة المخاطر، محفظتك، والشارتات.",
         "risk_btn": "🧮 حاسبة المخاطر",
         "port_btn": "📊 محفظتي",
-        "chart_btn": "📈 الشارت",
+        "chart_btn": "📈 شارت TradingView",
         "pat_btn": "🕯️ النماذج",
         "news_btn": "📰 الأخبار",
         "refs_btn": "🌐 المنصات",
@@ -307,7 +749,7 @@ TEXTS = {
         "welcome": "Welcome {name}! 👋\n\nWelcome to **Ryma Crypto Bot** for smart technical analysis.\n\n📌 **How to use:**\nJust send any coin symbol (e.g., BTC or ETH) and I will instantly analyze it for you, providing:\n- Entry and exit points.\n- 4 smart targets.\n- Proper Stop Loss.\n- Chart patterns.\n\n📊 Use the buttons below for quick access to the Risk Calculator, Portfolio, and Charts.",
         "risk_btn": "🧮 Risk Calculator",
         "port_btn": "📊 Portfolio",
-        "chart_btn": "📈 Chart",
+        "chart_btn": "📈 TradingView Chart",
         "pat_btn": "🕯️ Patterns",
         "news_btn": "📰 News",
         "refs_btn": "🌐 Exchanges",
@@ -514,17 +956,17 @@ def binance_mirror_klines(sym,tf,bars=500):
 
 class PairNotFound(Exception): pass
 class NoData(Exception): pass
-_ex,_ex_lock,_down={},{},{}
+_exch,_ex_lock,_down={},{},{}
 _ex_init=threading.Lock()
 
 def get_ex(name):
     with _ex_init:
-        if name not in _ex:
-            _ex[name]=getattr(ccxt,name)({"enableRateLimit":True,"timeout":12000})
+        if name not in _exch:
+            _exch[name]=getattr(ccxt,name)({"enableRateLimit":True,"timeout":12000})
             _ex_lock[name]=threading.Lock()
-    return _ex[name]
+    return _exch[name]
 
-def default_tf(sym): return "1d" if sym in MAJORS else "4h"
+def default_tf(sym): return "4h"
 
 def _rows_to_df(rows,tf,bars):
     cols=["t","open","high","low","close","volume"]
@@ -1549,6 +1991,27 @@ def fib_levels(df,lookback=SR_LOOKBACK):
         return [round(hi-diff*f,6) for f in FIB_LEVELS]
     except Exception: return []
 
+def _sgn_i(x): return 1 if x>0 else (-1 if x<0 else 0)
+
+def _eng_df(d):
+    return se.prepare(d[["t","open","high","low","close","volume"]])
+
+_btc_cache=[0,0]
+def btc_trend_cached():
+    if time.time()-_btc_cache[0]<300: return _btc_cache[1]
+    d=get_candles("BTC","4h",300,ttl=300,min_bars=100)
+    e=_eng_df(d); v=_sgn_i(se.trend_state(e,len(e)-1))
+    _btc_cache[0],_btc_cache[1]=time.time(),v
+    return v
+
+def _hypo_levels(price,side,atr):
+    """مستويات افتراضية للعرض فقط عند حالة الانتظار (لا تُنشر ولا تُتتبع)."""
+    risk=1.5*atr; tps=[]
+    for k,m in enumerate((1.5,2.5,3.5,5.0)):
+        px=price+side*risk*m
+        tps.append(dict(px=float(px),pct=round(100*side*(px-price)/price,2),frac=CORE_TP_FRACS[k],hit=False,src="R"))
+    return dict(entry=float(price),sl=float(price-side*risk),risk=float(risk),tps=tps,atr=float(atr))
+
 _analysis_cache={}
 def analyze(sym):
     tf=default_tf(sym); df=None; last_err=None
@@ -1574,8 +2037,14 @@ def analyze(sym):
         df_d=get_candles(sym,"1d",250,ttl=300,min_bars=100); df_d=add_indicators(df_d,100)
     except Exception as _ex: log.debug('ignored: %s', _ex)
     bias_d=daily_bias(df_d) if df_d is not None else 0
-    side=decide_side(df,i,trend,bias_d,long_ok,short_ok)
-    try: fut=futures_score_for(sym,side)
+    # ---------- المحرك الدقيق (signal_engine) ----------
+    ed=_eng_df(df); ed_d=_eng_df(df_d) if df_d is not None else None
+    ed_h=None
+    if tf!="1h":
+        try: ed_h=_eng_df(get_candles(sym,"1h",250,ttl=300,min_bars=100))
+        except Exception: ed_h=None
+    cand=_sgn_i(se.trend_state(ed,len(ed)-1))
+    try: fut=futures_score_for(sym,cand) if cand else dict(score=0,details=[])
     except Exception: fut=dict(score=0,details=[])
     fut_score=fut.get("score",0)
     try:
@@ -1592,14 +2061,39 @@ def analyze(sym):
             except Exception: continue
         patterns=all_pats
     except Exception: patterns=[]
-    grade=grade_setup(df,i,side,futures_score=fut_score,patterns=patterns)
-    lv=(compute_meme_levels(df,i,side,price) if is_meme else compute_core_levels(df,i,side,price))
+    btc_t=0
+    if sym!="BTC":
+        try: btc_t=btc_trend_cached()
+        except Exception: btc_t=0
+    ev=se.evaluate(ed,ed_d,ed_h,price=price,fut_score=fut_score,btc_trend=btc_t,patterns=patterns)
+    wait=(ev["status"]=="WAIT")
+    atr_now=float(ed["atr"].iloc[-1]) if not pd.isna(ed["atr"].iloc[-1]) else price*0.02
+    forced=False
+    if wait:
+        # المستخدم يريد صفقة دائماً: نبني أفضل صفقة ممكنة ونعلّمها "غير مؤهلة" (درجة C) مع الأسباب
+        forced=True
+        side=cand
+        if not side and ed_d is not None: side=_sgn_i(se.trend_state(ed_d,len(ed_d)-1))
+        if not side: side=1 if price>=float(ed["ema50"].iloc[-1]) else -1
+        lv=None
+        try:
+            lv,_w=se.build_levels(ed,len(ed)-1,side,price,atr_now,ed_d,
+                                  (len(ed_d)-1) if ed_d is not None else None,
+                                  dict(se.CFG,max_sl_atr=4.0,min_rr_tp1=0.8))
+        except Exception: lv=None
+        if lv is None: lv=_hypo_levels(price,side,atr_now)
+        grade="C"; wait=False
+    else:
+        side=ev["side"]; grade=ev["grade"]; lv=ev["lv"]
     if lv is None: raise NoData(sym)
     candle=detect_candle_pattern(df,i); sr_high,sr_low=find_sr_levels(df); fibs=fib_levels(df)
     last=df.iloc[-1]
     return dict(sym=sym,tf=tf,df=df,side=side,strategy=strategy,
-                rank={"A+":3,"A":2,"B":1,"C":0}.get(grade,0),grade=grade,setup=strategy,
+                rank={"A+":3,"A":2,"B":1,"C":0}.get(grade,-1),grade=grade,setup=strategy,
                 ok=1 if grade in ("A+","A","B") else 0,total=4,
+                wait=wait,forced=forced,wait_reasons=ev.get("wait_reasons",[]),reasons=ev.get("reasons",[]),
+                warnings=ev.get("warnings",[]),score=ev.get("score",0.0),
+                confidence=ev.get("confidence",0),watch=ev.get("watch"),trends=ev.get("trends",{}),
                 lv=lv,price=price,degraded=degraded,source=df.attrs.get("source","binance_fut"),
                 bar_t=int(last["t"]),rsi=float(last["rsi"]) if not pd.isna(last["rsi"]) else 50.0,
                 macd=float(last["macd"]) if not pd.isna(last["macd"]) else 0.0,
@@ -1658,7 +2152,7 @@ def trade_step(p,o,h,l,c,atr):
         ev.append(dict(kind="TP",j=j+1,px=tp["px"],pct=tp["pct"]))
     if p["remaining"]<=1e-9: return _finish(p,ev,"TP")
     if p["tps"][0]["hit"] and not p["be"]:
-        p["sl"]=_tighten(s,p["sl"],fill-s*BE_TRIGGER_R*risk); p["be"]=True
+        p["sl"]=_tighten(s,p["sl"],fill+s*BE_OFFSET_R*risk); p["be"]=True
         ev.append(dict(kind="BE_MOVED",px=p["sl"]))
     p["ext"]=max(p["ext"],h) if s==1 else min(p["ext"],l)
     if sum(t["hit"] for t in p["tps"])>=2:
@@ -2037,6 +2531,300 @@ def _right_labels(ax,levels,n,ylo,yhi,fs=9):
                 bbox=dict(boxstyle="round,pad=0.3",fc=it["col"],ec="none"))
 def _x_index(t_arr,t_ms): return float(np.clip(np.searchsorted(t_arr,t_ms),0,len(t_arr)-1))
 
+# ======================= شارت TradingView الاحترافي (نماذج + خطوط مرسومة) =======================
+TV_BARS=120
+TV_BG="#131722"; TV_GRID="#1c2230"; TV_TXT="#b2b5be"; TV_UP="#26a69a"; TV_DN="#ef5350"
+TV_COL={"bullish":"#2ebd85","bearish":"#f6465d","neutral":"#f0b90b"}
+TV_IV={"15m":"15","1h":"60","4h":"240","1d":"D"}
+
+def _tv_pivots(df,w=4):
+    H=df["high"].to_numpy(float); L=df["low"].to_numpy(float); n=len(df); hs=[]; ls=[]
+    for k in range(w,n-w):
+        if H[k]>=H[k-w:k+w+1].max(): hs.append((k,float(H[k])))
+        if L[k]<=L[k-w:k+w+1].min(): ls.append((k,float(L[k])))
+    def dedupe(p,keep_max):
+        out=[]
+        for k,v in p:
+            if out and k-out[-1][0]<w:
+                if (v>out[-1][1])==keep_max: out[-1]=(k,v)
+            else: out.append((k,v))
+        return out
+    return dedupe(hs,True),dedupe(ls,False)
+
+def _tv_classify(mh,ml,conv,L,pole,prior):
+    """mh/ml: ميل الخطين بوحدات ATR على كامل النافذة. conv: عرض النهاية/عرض البداية."""
+    flat,_ = 1.2,0
+    h_flat=abs(mh)<flat; l_flat=abs(ml)<flat
+    h_up=mh>=flat; h_dn=mh<=-flat; l_up=ml>=flat; l_dn=ml<=-flat
+    pb="bullish" if prior>0 else ("bearish" if prior<0 else "neutral")
+    if conv<0.78:
+        if L<=35 and conv<0.65 and abs(pole)>=5: return "Pennant","bullish" if pole>0 else "bearish"
+        if h_flat and l_up: return "Ascending Triangle","bullish"
+        if l_flat and h_dn: return "Descending Triangle","bearish"
+        if h_dn and l_up: return "Symmetrical Triangle",pb
+        if h_up and l_up: return "Rising Wedge","bearish"
+        if h_dn and l_dn: return "Falling Wedge","bullish"
+        return None
+    if conv<=1.35:
+        if abs(pole)>=5 and L<=45:
+            if pole>0 and mh<=0.5 and ml<=0.5: return "Bull Flag","bullish"
+            if pole<0 and mh>=-0.5 and ml>=-0.5: return "Bear Flag","bearish"
+        if h_flat and l_flat: return "Rectangle",pb
+        if h_up and l_up: return "Ascending Channel","bullish"
+        if h_dn and l_dn: return "Descending Channel","bearish"
+    return None
+
+def _tv_channel_patterns(df,hs,ls):
+    """مثلثات/أوتاد/أعلام/قنوات/مستطيل: خطوط مرسومة على القمم والقيعان الفعلية."""
+    H=df["high"].to_numpy(float); L=df["low"].to_numpy(float); C=df["close"].to_numpy(float)
+    n=len(df); atr=float(df["atr"].iloc[-1]) if "atr" in df and not pd.isna(df["atr"].iloc[-1]) else float(np.mean(H-L))
+    if atr<=0: return []
+    e=n-1; best=None
+    for Lw in (25,35,50,70,95):
+        s=max(0,e-Lw)
+        if e-s<20: continue
+        ph=[(k,v) for k,v in hs if s<=k<=e]; pl=[(k,v) for k,v in ls if s<=k<=e]
+        if len(ph)<2 or len(pl)<2: continue
+        xh=np.array([k for k,_ in ph],float); yh=np.array([v for _,v in ph])
+        xl=np.array([k for k,_ in pl],float); yl=np.array([v for _,v in pl])
+        mh=float(np.polyfit(xh,yh,1)[0]); ml=float(np.polyfit(xl,yl,1)[0])
+        bh=float(np.max(yh-mh*xh)); bl=float(np.min(yl-ml*xl))
+        up=lambda x:mh*x+bh; lo=lambda x:ml*x+bl
+        span=e-s; w0=up(s)-lo(s); w1=up(e)-lo(e)
+        if w0<=0.5*atr or w1<=0.3*atr: continue
+        th=sum(1 for k,v in ph if abs(v-up(k))<=0.45*atr); tl=sum(1 for k,v in pl if abs(v-lo(k))<=0.45*atr)
+        if th<2 or tl<2: continue
+        xs=np.arange(s,e+1)
+        out_frac=float(np.mean((C[s:e+1]>up(xs)+0.5*atr)|(C[s:e+1]<lo(xs)-0.5*atr)))
+        if out_frac>0.10: continue
+        pole=(C[s]-C[max(0,s-12)])/atr; prior=C[s]-C[max(0,s-30)]
+        prior=1 if prior>2*atr else (-1 if prior<-2*atr else 0)
+        cl=_tv_classify(mh*span/atr,ml*span/atr,w1/w0,span,pole,prior)
+        if not cl: continue
+        name,bias=cl; score=th+tl+min(span,60)/30
+        if best is None or score>best["score"]:
+            best=dict(score=score,s=s,e=e,up=up,lo=lo,name=name,bias=bias,w0=w0,pole=abs(pole)*atr,th=ph,tl=pl)
+    if best is None:
+        return []
+    s,e,up,lo,name,bias=best["s"],best["e"],best["up"],best["lo"],best["name"],best["bias"]
+    ext=10 if "Channel" not in name and name!="Rectangle" else 8
+    c_last=C[-1]
+    status="forming"; target=None
+    if c_last>up(e)+0.1*atr: status="breakout ↑"
+    elif c_last<lo(e)-0.1*atr: status="breakout ↓"
+    if name not in ("Ascending Channel","Descending Channel","Rectangle"):
+        h=best["pole"] if name in ("Bull Flag","Bear Flag","Pennant") and best["pole"]>0 else best["w0"]
+        if bias=="bullish" or status=="breakout ↑": target=up(e)+h
+        elif bias=="bearish" or status=="breakout ↓": target=lo(e)-h
+        else: target=None
+    lines=[dict(i1=s,p1=up(s),i2=e+ext,p2=up(e+ext),role="upper"),
+           dict(i1=s,p1=lo(s),i2=e+ext,p2=lo(e+ext),role="lower")]
+    poly=[(s,up(s)),(e,up(e)),(e,lo(e)),(s,lo(s))]
+    marks=[(k,v,"") for k,v in best["th"]+best["tl"]]
+    return [dict(name=name,bias=bias,status=status,lines=lines,poly=poly,marks=marks,
+                 target=target,anchor=(s,up(s)),tf_span=e-s,kind="channel",e=e)]
+
+def _tv_pivot_patterns(df,hs,ls):
+    """قمة/قاع مزدوج وثلاثي + رأس وكتفين (ومقلوب) مع خط العنق."""
+    H=df["high"].to_numpy(float); L=df["low"].to_numpy(float); C=df["close"].to_numpy(float); n=len(df)
+    out=[]; last=C[-1]
+    def near(a,b,tol): return abs(a-b)/max(a,b)*100<=tol
+    def add(name,bias,conf,lines,marks,target,anchor,e):
+        out.append(dict(name=name,bias=bias,status="confirmed" if conf else "forming",lines=lines,poly=None,
+                        marks=marks,target=target,anchor=anchor,kind="pivot",e=e))
+    # H&S
+    if len(hs)>=3 and n-hs[-1][0]<=45 and len(ls)>=2:
+        a,b,c=hs[-3],hs[-2],hs[-1]
+        if b[1]>a[1] and b[1]>c[1] and near(a[1],c[1],4.0) and c[0]-a[0]>=14:
+            t1=[x for x in ls if a[0]<x[0]<b[0]]; t2=[x for x in ls if b[0]<x[0]<c[0]]
+            if t1 and t2:
+                n1=min(t1,key=lambda x:x[1]); n2=min(t2,key=lambda x:x[1])
+                m=(n2[1]-n1[1])/(n2[0]-n1[0]); neck=lambda x:n1[1]+m*(x-n1[0])
+                conf=last<neck(n-1)
+                add("Head & Shoulders","bearish",conf,
+                    [dict(i1=a[0],p1=a[1],i2=b[0],p2=b[1],role="pattern"),dict(i1=b[0],p1=b[1],i2=c[0],p2=c[1],role="pattern"),
+                     dict(i1=n1[0],p1=n1[1],i2=n-1+8,p2=neck(n-1+8),role="neck")],
+                    [(a[0],a[1],"LS"),(b[0],b[1],"H"),(c[0],c[1],"RS"),(n1[0],n1[1],""),(n2[0],n2[1],"")],
+                    neck(c[0])-(b[1]-neck(b[0])),(a[0],a[1]),n-1)
+    if len(ls)>=3 and n-ls[-1][0]<=45 and len(hs)>=2:
+        a,b,c=ls[-3],ls[-2],ls[-1]
+        if b[1]<a[1] and b[1]<c[1] and near(a[1],c[1],4.0) and c[0]-a[0]>=14:
+            t1=[x for x in hs if a[0]<x[0]<b[0]]; t2=[x for x in hs if b[0]<x[0]<c[0]]
+            if t1 and t2:
+                n1=max(t1,key=lambda x:x[1]); n2=max(t2,key=lambda x:x[1])
+                m=(n2[1]-n1[1])/(n2[0]-n1[0]); neck=lambda x:n1[1]+m*(x-n1[0])
+                conf=last>neck(n-1)
+                add("Inverse Head & Shoulders","bullish",conf,
+                    [dict(i1=a[0],p1=a[1],i2=b[0],p2=b[1],role="pattern"),dict(i1=b[0],p1=b[1],i2=c[0],p2=c[1],role="pattern"),
+                     dict(i1=n1[0],p1=n1[1],i2=n-1+8,p2=neck(n-1+8),role="neck")],
+                    [(a[0],a[1],"LS"),(b[0],b[1],"H"),(c[0],c[1],"RS"),(n1[0],n1[1],""),(n2[0],n2[1],"")],
+                    neck(c[0])+(neck(b[0])-b[1]),(a[0],a[1]),n-1)
+    # Triple / Double top
+    if len(hs)>=3 and n-hs[-1][0]<=40 and near(hs[-1][1],hs[-2][1],1.6) and near(hs[-2][1],hs[-3][1],1.6) \
+       and hs[-1][0]-hs[-3][0]>=12:
+        a,b,c=hs[-3],hs[-2],hs[-1]; neck=float(L[a[0]:c[0]+1].min()); conf=last<neck
+        top=(a[1]+b[1]+c[1])/3
+        add("Triple Top","bearish",conf,
+            [dict(i1=a[0],p1=top,i2=n-1+8,p2=top,role="pattern"),dict(i1=a[0],p1=neck,i2=n-1+8,p2=neck,role="neck")],
+            [(a[0],a[1],"1"),(b[0],b[1],"2"),(c[0],c[1],"3")],neck-(top-neck),(a[0],top),n-1)
+    elif len(hs)>=2 and n-hs[-1][0]<=40 and near(hs[-1][1],hs[-2][1],1.5) and hs[-1][0]-hs[-2][0]>=6:
+        a,b=hs[-2],hs[-1]; neck=float(L[a[0]:b[0]+1].min()); conf=last<neck; top=(a[1]+b[1])/2
+        add("Double Top","bearish",conf,
+            [dict(i1=a[0],p1=top,i2=b[0]+6,p2=top,role="pattern"),dict(i1=a[0],p1=neck,i2=n-1+8,p2=neck,role="neck")],
+            [(a[0],a[1],"1"),(b[0],b[1],"2")],neck-(top-neck),(a[0],top),n-1)
+    if len(ls)>=3 and n-ls[-1][0]<=40 and near(ls[-1][1],ls[-2][1],1.6) and near(ls[-2][1],ls[-3][1],1.6) \
+       and ls[-1][0]-ls[-3][0]>=12:
+        a,b,c=ls[-3],ls[-2],ls[-1]; neck=float(H[a[0]:c[0]+1].max()); conf=last>neck
+        bot=(a[1]+b[1]+c[1])/3
+        add("Triple Bottom","bullish",conf,
+            [dict(i1=a[0],p1=bot,i2=n-1+8,p2=bot,role="pattern"),dict(i1=a[0],p1=neck,i2=n-1+8,p2=neck,role="neck")],
+            [(a[0],a[1],"1"),(b[0],b[1],"2"),(c[0],c[1],"3")],neck+(neck-bot),(a[0],bot),n-1)
+    elif len(ls)>=2 and n-ls[-1][0]<=40 and near(ls[-1][1],ls[-2][1],1.5) and ls[-1][0]-ls[-2][0]>=6:
+        a,b=ls[-2],ls[-1]; neck=float(H[a[0]:b[0]+1].max()); conf=last>neck; bot=(a[1]+b[1])/2
+        add("Double Bottom","bullish",conf,
+            [dict(i1=a[0],p1=bot,i2=b[0]+6,p2=bot,role="pattern"),dict(i1=a[0],p1=neck,i2=n-1+8,p2=neck,role="neck")],
+            [(a[0],a[1],"1"),(b[0],b[1],"2")],neck+(neck-bot),(a[0],bot),n-1)
+    return out
+
+def tv_detect(df):
+    """يرجع قائمة نماذج جاهزة للرسم (بإحداثيات رقم الشمعة داخل df). لا يرجع قائمة فارغة أبداً:
+    إذا لم يوجد نموذج يرسم قناة الاتجاه (Trend Channel) كي يكون هناك دائماً خطوط واضحة."""
+    df=df.reset_index(drop=True)
+    hs,ls=_tv_pivots(df,4)
+    pats=_tv_channel_patterns(df,hs,ls)+_tv_pivot_patterns(df,hs,ls)
+    if not pats:
+        n=len(df); k=min(60,n); x=np.arange(n-k,n,dtype=float); C=df["close"].to_numpy(float)[n-k:]
+        m,b=np.polyfit(x,C,1); res_=C-(m*x+b); sd=float(res_.std()) or 1e-9
+        top=float(np.max(df["high"].to_numpy(float)[n-k:]-(m*x+b))); bot=float(np.min(df["low"].to_numpy(float)[n-k:]-(m*x+b)))
+        atr=float(df["atr"].iloc[-1]) if "atr" in df and not pd.isna(df["atr"].iloc[-1]) else sd
+        slope=m*k/atr
+        name="Ascending Channel" if slope>1.5 else ("Descending Channel" if slope<-1.5 else "Range / Sideways")
+        bias="bullish" if slope>1.5 else ("bearish" if slope<-1.5 else "neutral")
+        s,e=n-k,n-1; up=lambda i:m*i+b+top; lo=lambda i:m*i+b+bot
+        pats=[dict(name="Trend "+name if "Channel" in name else name,bias=bias,status="forming",
+                   lines=[dict(i1=s,p1=up(s),i2=e+8,p2=up(e+8),role="upper"),dict(i1=s,p1=lo(s),i2=e+8,p2=lo(e+8),role="lower")],
+                   poly=[(s,up(s)),(e,up(e)),(e,lo(e)),(s,lo(s))],marks=[],target=None,anchor=(s,up(s)),kind="channel",e=e)]
+    return pats[:3]
+
+def render_tv_chart(df,sym,tf,lv=None,side=0,sr_high=(),sr_low=(),src="Binance Futures"):
+    """شارت بنمط TradingView الداكن: شموع + خطوط النماذج مرسومة كأنها يدوية + أداة الصفقة (Long/Short position)."""
+    d=df.tail(TV_BARS).reset_index(drop=True).copy()
+    c_=d["close"]; d["ema20"]=c_.ewm(span=20,adjust=False).mean(); d["ema50"]=c_.ewm(span=50,adjust=False).mean()
+    if "atr" not in d or d["atr"].isna().all():
+        pc=c_.shift(); tr=pd.concat([d["high"]-d["low"],(d["high"]-pc).abs(),(d["low"]-pc).abs()],axis=1).max(axis=1)
+        d["atr"]=tr.ewm(alpha=1/14,adjust=False).mean()
+    n=len(d); pats=tv_detect(d)
+    fig=_new_fig(12,8,TV_BG)
+    ax=fig.add_axes([0.035,0.24,0.875,0.66]); axv=fig.add_axes([0.035,0.075,0.875,0.15],sharex=ax)
+    _draw_candles(ax,d,TV_UP,TV_DN,0.7)
+    o=d["open"].to_numpy(float); cl=d["close"].to_numpy(float); v=d["volume"].to_numpy(float)
+    axv.bar(np.arange(n),v,color=np.where(cl>=o,TV_UP,TV_DN),alpha=0.55,width=0.7,linewidth=0)
+    ax.plot(np.arange(n),d["ema20"],color="#f7a600",lw=1.3,alpha=0.9,zorder=4)
+    ax.plot(np.arange(n),d["ema50"],color="#2962ff",lw=1.3,alpha=0.9,zorder=4)
+    ys=[float(d["low"].min()),float(d["high"].max())]
+    for lvl in list(sr_high)[:2]:
+        ax.axhline(lvl,color="#787b86",lw=1.0,ls=(0,(6,4)),alpha=0.8,zorder=2)
+    for lvl in list(sr_low)[:2]:
+        ax.axhline(lvl,color="#787b86",lw=1.0,ls=(0,(6,4)),alpha=0.8,zorder=2)
+    shadow=[pe.withStroke(linewidth=6,foreground="black",alpha=0.25),pe.Normal()]
+    for pi,p in enumerate(pats):
+        col=TV_COL.get(p["bias"],"#f0b90b")
+        if p.get("poly"):
+            ax.add_patch(Polygon(p["poly"],closed=True,facecolor=col,alpha=0.12,edgecolor="none",zorder=3))
+        for ln in p["lines"]:
+            ls_="-" if ln["role"] in ("upper","lower","pattern") else (0,(8,4))
+            lw=2.6 if ln["role"]!="neck" else 2.0
+            ax.plot([ln["i1"],ln["i2"]],[ln["p1"],ln["p2"]],color=col if ln["role"]!="neck" else "#f0b90b",
+                    lw=lw,ls=ls_,solid_capstyle="round",zorder=6,path_effects=shadow)
+            ys+= [ln["p1"],ln["p2"]]
+        for (i,pv,lab) in p["marks"]:
+            ax.scatter([i],[pv],s=46,color=TV_BG,edgecolor=col,linewidth=2.0,zorder=8)
+            if lab and pi==0:
+                ax.annotate(lab,(i,pv),xytext=(0,12 if p["bias"]!="bullish" else -16),textcoords="offset points",
+                            ha="center",fontsize=10,fontweight="bold",color="white",zorder=9,
+                            bbox=dict(boxstyle="round,pad=0.25",fc=col,ec="none"))
+        if p.get("target") and pi==0:
+            tgt=float(p["target"]); e=p["e"]; ys.append(tgt)
+            ax.annotate("",xy=(e+11,tgt),xytext=(e,cl[-1]),zorder=7,
+                        arrowprops=dict(arrowstyle="-|>",color=col,lw=2.0,ls=(0,(5,3)),shrinkA=0,shrinkB=0))
+            ax.text(e+11.4,tgt,f" TARGET {fmt(tgt)} ",color="white",fontsize=9,fontweight="bold",va="center",ha="left",
+                    zorder=9,bbox=dict(boxstyle="round,pad=0.3",fc=col,ec="none"),clip_on=False)
+        ax_,ay_=p["anchor"]
+        arrow="▲" if p["bias"]=="bullish" else ("▼" if p["bias"]=="bearish" else "◆")
+        ax.text(ax_+0.5,ay_,f" {p['name']}  {arrow} {p['bias'].capitalize()}  ·  {p['status']} ",color="white",
+                fontsize=11 if pi==0 else 9.5,fontweight="bold",va="bottom" if pi==0 else "top",ha="left",zorder=10,
+                bbox=dict(boxstyle="round,pad=0.35",fc=col,ec="none",alpha=0.95))
+    levels=[]
+    if lv:
+        e0,sl=lv["entry"],lv["sl"]; tps=[t["px"] for t in lv["tps"]]
+        gcol,rcol=TV_UP,TV_DN
+        zx=n-1
+        ax.add_patch(Rectangle((zx,min(e0,tps[0])),12,abs(tps[0]-e0),facecolor=gcol,alpha=0.16,edgecolor="none",zorder=2))
+        ax.add_patch(Rectangle((zx,min(e0,sl)),12,abs(sl-e0),facecolor=rcol,alpha=0.16,edgecolor="none",zorder=2))
+        levels=[("ENTRY",e0,"#2962ff","-."),("STOP",sl,rcol,"--")]+[(f"TP{j}",px,gcol,"--") for j,px in enumerate(tps[:4],1)]
+        for name,px,col,ls_ in levels:
+            ax.plot([zx-6,zx+12],[px,px],color=col,lw=1.4,ls=ls_,zorder=5); ys.append(px)
+    lo_,hi_=min(ys),max(ys)
+    base_lo,base_hi=float(d["low"].min()),float(d["high"].max()); rng=base_hi-base_lo
+    lo_=max(lo_,base_lo-0.9*rng); hi_=min(hi_,base_hi+0.9*rng)
+    pad=(hi_-lo_)*0.05; ylo,yhi=lo_-pad,hi_+pad
+    ax.set_ylim(ylo,yhi); ax.set_xlim(-1,n+16)
+    if levels: _right_labels(ax,levels,n+12,ylo,yhi,fs=8.5)
+    last=float(cl[-1]); up=cl[-1]>=o[-1]
+    ax.text(n+0.3,last,f" {fmt(last)} ",color="white",fontsize=9.5,fontweight="bold",va="center",ha="left",clip_on=False,zorder=11,
+            bbox=dict(boxstyle="square,pad=0.25",fc=TV_UP if up else TV_DN,ec="none"))
+    ax.axhline(last,color=TV_UP if up else TV_DN,lw=0.8,ls=(0,(2,3)),alpha=0.8,zorder=1)
+    _style_axes([ax,axv],TV_BG,TV_TXT,TV_GRID)
+    for a in (ax,axv):
+        for sp in a.spines.values(): sp.set_visible(False)
+        a.grid(color=TV_GRID,lw=0.7,alpha=1)
+    ax.tick_params(labelbottom=False); axv.set_ylim(0,float(v.max())*1.15 if v.max()>0 else 1)
+    axv.tick_params(labelleft=False,labelright=False); _time_ticks(axv,d)
+    chg=(cl[-1]/o[0]-1)*100
+    fig.text(0.04,0.955,f"{sym}/USDT · {tf.upper()} · {src}",fontsize=16,fontweight="bold",color="white",ha="left")
+    fig.text(0.04,0.925,f"O {fmt(o[-1])}   H {fmt(d['high'].iloc[-1])}   L {fmt(d['low'].iloc[-1])}   C {fmt(cl[-1])}   {chg:+.2f}%",
+             fontsize=10.5,color=TV_UP if chg>=0 else TV_DN,ha="left")
+    fig.text(0.62,0.925,"━ EMA20",fontsize=10,color="#f7a600",ha="left"); fig.text(0.70,0.925,"━ EMA50",fontsize=10,color="#2962ff",ha="left")
+    fig.text(0.5,0.5,"Ryma Crypto",fontsize=70,color="white",alpha=0.03,ha="center",va="center",rotation=18,fontweight="bold")
+    fig.text(0.04,0.012,"Auto-drawn patterns · Not financial advice",fontsize=9,color="#787b86",ha="left")
+    fig.text(0.965,0.012,"Ryma Crypto",fontsize=11,color="#c9a227",ha="right",fontweight="bold")
+    return _to_png(fig),pats
+
+def tv_caption(sym,tf,pats,lang="ar"):
+    ico={"bullish":"🟢","bearish":"🔴","neutral":"🟡"}
+    if lang=="en":
+        lines=[f"📈 <b>#{sym}/USDT · {tf.upper()} — TradingView style</b>",""]
+        lines+=[f"{ico.get(p['bias'],'⚪')} <b>{p['name']}</b> — {p['bias']} ({p['status']})"
+                +(f" | 🎯 {fmt(p['target'])}" if p.get('target') else "") for p in pats]
+        lines+=["","ℹ️ Lines are auto-drawn on real swing highs/lows. Wait for a candle close beyond the line before entering.",RISK_WARNING_EN]
+    else:
+        lines=[f"📈 <b>#{sym}/USDT · {tf.upper()} — شارت بنمط TradingView</b>",""]
+        lines+=[f"{ico.get(p['bias'],'⚪')} <b>{p['name']}</b> — {p['bias']} ({p['status']})"
+                +(f" | 🎯 {fmt(p['target'])}" if p.get('target') else "") for p in pats]
+        lines+=["","ℹ️ الخطوط مرسومة تلقائياً على القمم والقيعان الحقيقية. لا تدخل قبل إغلاق شمعة خارج الخط (اختراق مؤكد).",RISK_WARNING_AR]
+    return "\n".join(lines)
+
+def tv_keyboard(sym,tf,lang="ar"):
+    ar=(lang=="ar"); iv=TV_IV.get(tf,"240")
+    url=f"https://www.tradingview.com/chart/?symbol=BINANCE%3A{sym}USDT.P&interval={iv}"
+    tfs=[("15m","15m"),("1h","1H"),("4h","4H"),("1d","1D")]
+    row=[_btn(("✅ " if k==tf else "")+lab,callback_data=f"tv:{sym}:{k}",style="primary" if k==tf else None) for k,lab in tfs]
+    return InlineKeyboardMarkup([row,
+        [_btn("🔗 افتح في TradingView" if ar else "🔗 Open in TradingView",url=url)],
+        [_btn("🔄 تحديث" if ar else "🔄 Refresh",callback_data=f"tv:{sym}:{tf}"),
+         _btn("❌ إغلاق" if ar else "❌ Close",callback_data="close_menu")]])
+
+def build_tv_for(sym,tf,res):
+    if res and tf==res.get("tf"):
+        return render_tv_chart(res["df"],sym,tf,lv=res.get("lv"),side=res.get("side",0),
+                               sr_high=res.get("sr_high",[]),sr_low=res.get("sr_low",[]),
+                               src=display_source(res.get("source","binance_fut")).title())
+    df=get_candles(sym,tf,300,ttl=120,min_bars=100); df=add_indicators(df,100)
+    sh,sl=find_sr_levels(df)
+    return render_tv_chart(df,sym,tf,lv=None,sr_high=sh[:2],sr_low=sl[:2],
+                           src=display_source(df.attrs.get("source","binance_fut")).title())
+
+
 def render_chart(res,tier="free",published=False):
     df=res["df"].tail(CHART_BARS).reset_index(drop=True)
     lv,side,sym,tf=res["lv"],res["side"],res["sym"],res["tf"]
@@ -2057,6 +2845,7 @@ def render_chart(res,tier="free",published=False):
     levels=[("ENTRY",lv["entry"],"#1d4ed8","-."),("STOP",lv["sl"],"#dc2626","--")]
     for j,tp in enumerate(lv["tps"][:n_tps],1):
         levels.append((f"TP{j}",tp["px"],"#15803d","--"))
+    if res.get("wait"): levels=[]
     for name,px,col,ls in levels: ax.axhline(px,color=col,lw=1.7,ls=ls,zorder=3)
     lo=min([float(df["low"].min())]+[v[1] for v in levels])
     hi=max([float(df["high"].max())]+[v[1] for v in levels])
@@ -2077,7 +2866,7 @@ def render_chart(res,tier="free",published=False):
              va="center",ha="left",clip_on=False,bbox=dict(boxstyle="round,pad=0.3",fc="#7c3aed",ec="none"))
     _style_axes([ax,axr],bg,fg,grid); _time_ticks(axr,df)
     fig.text(0.065,0.945,f"{sym}/USDT  ·  Binance Futures  ·  {tf.upper()}",fontsize=17,fontweight="bold",color=fg,ha="left")
-    fig.text(0.065,0.915,f"Direction: {'LONG' if side == 1 else 'SHORT'}   |   EMA 20 / EMA 50   |   Bollinger (20, 2)   |   RSI (14)",fontsize=10,color="#475569",ha="left")
+    fig.text(0.065,0.915,f"Direction: {'WAIT' if res.get('wait') else ('LONG' if side == 1 else 'SHORT')}   |   EMA 20 / EMA 50   |   Bollinger (20, 2)   |   RSI (14)",fontsize=10,color="#475569",ha="left")
     fig.text(0.065,0.012,"Source: Binance Live Data",fontsize=9,color="#2563eb",ha="left")
     fig.text(0.985,0.012,"Ryma Crypto",fontsize=11,color="#b8860b",ha="right",fontweight="bold")
     return _to_png(fig)
@@ -2212,7 +3001,34 @@ def render_trade_card(res,tier="free"):
             ha="center",va="center",color="#64748b",fontsize=10,zorder=4)
     return _to_png(fig)
 
+def caption_wait(res,lang="ar"):
+    sym=res["sym"]; tr=res.get("trends") or {}
+    nm={2:"صاعد قوي",1:"صاعد",0:"عرضي",-1:"هابط",-2:"هابط قوي"}
+    nm_en={2:"Strong up",1:"Up",0:"Range",-1:"Down",-2:"Strong down"}
+    N=nm if lang=="ar" else nm_en
+    lines=[]
+    if lang=="ar":
+        lines+=[f"⏳ <b>#{sym}/USDT — لا توجد صفقة مناسبة الآن</b>","",
+                f"💵 السعر: <code>{fmt(res['price'])}</code>",
+                f"🧭 يومي: {N.get(tr.get('d1',0))} | 4س: {N.get(tr.get('h4',0))} | 1س: {N.get(tr.get('h1',0))}","",
+                "📌 <b>لماذا الانتظار؟</b>"]
+        lines+=[f"  • {r}" for r in res.get("wait_reasons",[])[:3]] or ["  • الشروط غير مكتملة"]
+        if res.get("watch"): lines+=["",f"👀 منطقة المراقبة للدخول: <code>{fmt(res['watch'])}</code>"]
+        lines+=["","💡 الدقة أهم من عدد الصفقات: البوت لا يعطيك صفقة إلا إذا توافقت الشروط (اتجاه يومي + 4س، ستوب هيكلي، مساحة للأهداف).",
+                "",RISK_WARNING_AR,f"👤 {BRAND}"]
+    else:
+        lines+=[f"⏳ <b>#{sym}/USDT — No quality setup right now</b>","",
+                f"💵 Price: <code>{fmt(res['price'])}</code>",
+                f"🧭 1D: {N.get(tr.get('d1',0))} | 4H: {N.get(tr.get('h4',0))} | 1H: {N.get(tr.get('h1',0))}","",
+                "📌 <b>Why wait?</b>"]
+        lines+=[f"  • {r}" for r in res.get("wait_reasons",[])[:3]] or ["  • Conditions incomplete"]
+        if res.get("watch"): lines+=["",f"👀 Watch entry zone: <code>{fmt(res['watch'])}</code>"]
+        lines+=["","💡 Accuracy over quantity: a trade is issued only when trend (1D+4H), structural stop and room-to-target all agree.",
+                "",RISK_WARNING_EN,f"👤 {BRAND}"]
+    return "\n".join(lines)
+
 def caption_core(res,tier="free",lang="ar"):
+    if res.get("wait"): return caption_wait(res,lang)
     side,lv,sym=res["side"],res["lv"],res["sym"]
     if lang=="en":
         side_word="🟢 LONG" if side==1 else "🔴 SHORT"
@@ -2236,6 +3052,7 @@ def caption_core(res,tier="free",lang="ar"):
             pat_names=" | ".join(f"{p['name']}{'[' + p.get('tf','').upper() + ']' if p.get('tf') else ''}" for p in pats[:2])
             lines.append(f"🕯 Pattern: {pat_names}")
         if grade in ("B","C"): lines+=["","👁 <b>Watch setup:</b> enter only after breakout/breakdown is confirmed"]
+        if res.get("forced"): lines+=["","⚠️ <b>Not a qualified setup (high risk):</b>"]+[f"  • {r}" for r in res.get("wait_reasons",[])[:3]]+["  💡 Use half your usual position size"]
         lines+=["","━━━━━━━━━━━━━━━━",f"🎯 <b>Expected Decision: {decision}</b>"]
         lines+=["",RISK_WARNING_EN,f"👤 {BRAND}"]
         return "\n".join(lines)
@@ -2261,6 +3078,7 @@ def caption_core(res,tier="free",lang="ar"):
         pat_names=" | ".join(f"{p['name']}{'[' + p.get('tf','').upper() + ']' if p.get('tf') else ''}" for p in pats[:2])
         lines.append(f"🕯 النموذج: {pat_names}")
     if grade in ("B","C"): lines+=["","👁 <b>صفقة مراقبة:</b> ادخل فقط بعد تأكيد الاختراق أو الكسر"]
+    if res.get("forced"): lines+=["","⚠️ <b>صفقة غير مؤهلة بمعايير الدقة (مخاطرة عالية):</b>"]+[f"  • {r}" for r in res.get("wait_reasons",[])[:3]]+["  💡 قلّل حجم الصفقة إلى نصف مخاطرتك المعتادة"]
     lines+=["","━━━━━━━━━━━━━━━━",f"🎯 <b>القرار المتوقع: {decision}</b>"]
     lines+=["",RISK_WARNING_AR,f"👤 {BRAND}"]
     return "\n".join(lines)
@@ -2290,6 +3108,7 @@ def keyboard_admin(sym,tf,source="binance_fut",lang="en"):
     return InlineKeyboardMarkup([
         [_btn("🧮 حاسبة المخاطر" if ar else "🧮 Risk Calc",callback_data=f"calc_risk:{sym}"),
          _btn("📊 محفظتي" if ar else "📊 Portfolio",callback_data="my_portfolio")],
+        [_btn("📈 شارت TradingView" if ar else "📈 TradingView Chart",callback_data=f"tv:{sym}:{tf}")],
         [_btn("🌐 جميع المنصات" if ar else "🌐 All Platforms",callback_data=f"refs:{source}")],
         [_btn("📊 المؤشرات" if ar else "📊 Indicators",callback_data=f"ind:{sym}:{tf}"),
          _btn("💧 السيولة" if ar else "💧 Liquidity",callback_data=f"liq:{sym}")],
@@ -2452,6 +3271,7 @@ def track_signal(res):
     return p
 
 async def publish(bot,res,vip=True,free=False,admin_copy=False):
+    if res.get("wait"): return []
     sent=[]; copy_text=build_copy_post(res); source=res.get("source","binance_fut")
     try:
         if vip and VIP_CHANNEL_ID:
@@ -2518,7 +3338,7 @@ async def run_autopost(bot):
     log.info("run_autopost: بدء المسح")
     syms=await asyncio.to_thread(top_symbols,60)
     results=await asyncio.to_thread(scan_sync,syms[:40])
-    cands=[r for r in results if r["rank"]>=0 and r["sym"] not in WEAK_COINS and r["sym"] not in EXCLUDE_TICKERS]
+    cands=[r for r in results if r["rank"]>=0 and not r.get("forced") and r["sym"] not in WEAK_COINS and r["sym"] not in EXCLUDE_TICKERS]
     cands.sort(key=lambda r:(-r["rank"],-r.get("ok",0)))
     today=dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d")
     if _free_day["d"]!=today: _free_day.update(d=today,n=0)
@@ -3005,18 +3825,17 @@ def binance_futures_klines_long(sym, tf, bars):
     return out[-bars:] if out else None
 
 def backtest_symbol(sym, years=3.0):
-    tf = default_tf(sym)
-    need = int(years*(6*365 if tf=="4h" else 365))+260
-    rows = binance_futures_klines_long(sym, tf, need)
-    if rows and len(rows) >= 250:
-        df = _rows_to_df(rows, tf, need)
+    need = int(years*6*365)+300
+    rows = binance_futures_klines_long(sym, "4h", need)
+    if rows and len(rows) >= 400:
+        df = _rows_to_df(rows, "4h", need)
     else:
-        df = get_candles(sym, tf, need, ttl=900)
-    n = len(df)
-    if n < 250: return [], int(df["t"].iloc[0]), int(df["t"].iloc[-1])
-    df = add_indicators(df, 100)
-    trades = simulate(df, sym, tf, 210)
-    return trades, int(df["t"].iloc[210]), int(df["t"].iloc[-1])
+        df = get_candles(sym, "4h", need, ttl=900)
+    if len(df) < 400: return [], int(df["t"].iloc[0]), int(df["t"].iloc[-1])
+    raw = df[["t","open","high","low","close","volume"]]
+    trs = se.simulate(raw, None, start=260)
+    for x in trs: x.update(coin=sym, setup="Engine")
+    return trs, int(df["t"].iloc[260]), int(df["t"].iloc[-1])
 
 def metrics(trs):
     if not trs: return dict(n=0,wr=0.0,pf=0.0,total=0.0,avg=0.0,dd=0.0,tp1=0.0)
@@ -3680,6 +4499,8 @@ async def cmd_share(update,ctx):
     sym=clean_symbol(ctx.args[0]); wait=await update.message.reply_text(f"⏳ جارٍ تجهيز {sym}...")
     try:
         res=await asyncio.to_thread(get_analysis,sym,True)
+        if res.get("wait"):
+            await wait.edit_text("⏳ لا توجد صفقة مؤهلة لـ "+sym+" (انتظار)."); return
         await wait.delete()
         img=await asyncio.to_thread(render_chart,res,"vip")
         await update.message.reply_photo(photo=img)
@@ -3697,6 +4518,8 @@ async def cmd_neon(update,ctx):
     wait = await update.message.reply_text(f"💳 جارٍ توليد بطاقة النيون لـ {sym}...")
     try:
         res = await asyncio.to_thread(get_analysis, sym, True)
+        if res.get("wait"):
+            await wait.edit_text("⏳ لا توجد صفقة مؤهلة لـ "+sym+" (انتظار)."); return
         card = await asyncio.to_thread(render_trade_card, res, "admin")
         await update.message.reply_photo(photo=card)
         await wait.delete()
@@ -3747,8 +4570,8 @@ async def cmd_post(update,ctx):
     if not ctx.args: await update.message.reply_text("مثال: /post BTC"); return
     sym=clean_symbol(ctx.args[0])
     res=await asyncio.to_thread(get_analysis,sym,True)
-    if res.get("grade")=="C":
-        await update.message.reply_text(f"⛔ {sym}: درجة C لا تُنشر للقنوات (مراقبة داخلية فقط)."); return
+    if res.get("grade") in ("C","WAIT") or res.get("wait"):
+        await update.message.reply_text(f"⛔ {sym}: لا توجد صفقة مؤهلة (انتظار) — لا تُنشر للقنوات."); return
     sent=await publish(ctx.bot,res,vip=True,free=True,admin_copy=False)
     if any(x in ("VIP","FREE") for x in sent) and res["rank"]>=0: track_signal(res)
     await update.message.reply_text(f"✅ نُشر: {', '.join(sent)}")
@@ -3781,7 +4604,7 @@ async def cmd_scan(update,ctx):
     wait=await update.message.reply_text("⏳ فحص...")
     syms=await asyncio.to_thread(top_symbols,60,True)
     res=await asyncio.to_thread(scan_sync,syms[:30])
-    res=[r for r in res if r["rank"]>=0]; res.sort(key=lambda r:-r["rank"])
+    res=[r for r in res if r["rank"]>=0 and not r.get("forced")]; res.sort(key=lambda r:-r["rank"])
     if not res: await wait.edit_text("لا شيء"); return
     lines=["🎯 أفضل الإعدادات:",""]
     for r in res[:10]:
@@ -3797,9 +4620,9 @@ async def cmd_scan(update,ctx):
 async def cmd_short(update,ctx):
     wait=await update.message.reply_text("⏳...")
     res=await asyncio.to_thread(scan_sync,COINS)
-    res=[r for r in res if r["side"]==-1 and r["rank"]>=0]
+    res=[r for r in res if r["side"]==-1 and r["rank"]>=0 and not r.get("forced")]
     if not res: await wait.edit_text("لا شورت"); return
-    lines=["🔻 فرص شورت:"]+[f"{r['grade']} | #{r['sym']} | 🎯 شراء: بيع" for r in res[:15]]
+    lines=["🔻 فرص شورت:"]+[f"{r['grade']} | #{r['sym']} | 🎯 بيع" for r in res[:15]]
     await wait.edit_text("\n".join(lines),link_preview_options=NO_PREVIEW)
 
 @admin_only
@@ -3993,6 +4816,8 @@ async def cb_handler(update,ctx):
         wait = await q.message.reply_text(f"💳 جارٍ توليد بطاقة النيون لـ {sym}...")
         try:
             res = await asyncio.to_thread(get_analysis, sym, True)
+            if res.get("wait"):
+                await wait.edit_text("⏳ لا توجد صفقة مؤهلة (انتظار)."); return
             card = await asyncio.to_thread(render_trade_card, res, "admin")
             await q.message.reply_photo(photo=card)
             await wait.delete()
@@ -4076,6 +4901,8 @@ async def cb_handler(update,ctx):
         sym=q.data.split(":")[1]
         try:
             res=await asyncio.to_thread(get_analysis,sym,True)
+            if res.get("wait"):
+                await q.message.reply_text("⏳ لا توجد صفقة مؤهلة حالياً."); return
             await q.message.reply_text("👇 اختر المنصة لنسخ المنشور:",reply_markup=keyboard_share_post(res))
         except Exception: pass
         return
@@ -4200,6 +5027,30 @@ async def cb_handler(update,ctx):
             await q.message.reply_text(text[:4000])
         except Exception as _ex: log.debug('ignored: %s', _ex)
         return
+    if q.data.startswith(("tv:","chart:")):
+        parts=q.data.split(":"); sym=parts[1]; tf=parts[2] if len(parts)>2 and parts[2] in TV_IV else None
+        if cb_throttled(q.from_user.id,4):
+            await q.message.reply_text("⏳ انتظر قليلاً ثم أعد المحاولة"); return
+        user=touch_user(q.from_user,"tvchart"); st,_=user_status(q.from_user.id,user)
+        if st=="blocked":
+            await q.message.reply_text(t("blocked",get_user_lang(q.from_user.id),contact=CONTACT_LINK)); return
+        lang=get_user_lang(q.from_user.id)
+        wait_m=await q.message.reply_text("📈 جارٍ رسم الشارت والنماذج..." if lang=="ar" else "📈 Drawing chart & patterns...")
+        try:
+            res=await asyncio.to_thread(get_analysis,sym)
+            tf=tf or res["tf"]
+            img,pats=await asyncio.to_thread(build_tv_for,sym,tf,res)
+            await ctx.bot.send_photo(q.message.chat.id,photo=img,caption=tv_caption(sym,tf,pats,lang)[:1000],
+                                     parse_mode=ParseMode.HTML,reply_markup=tv_keyboard(sym,tf,lang),
+                                     protect_content=(st!="admin" and PROTECT))
+        except PairNotFound: await q.message.reply_text(t("not_found",lang,sym=sym))
+        except NoData: await q.message.reply_text(t("no_data",lang))
+        except Exception:
+            log.exception("tvchart"); await q.message.reply_text("⚠️ تعذر إنشاء الشارت الآن" if lang=="ar" else "⚠️ Couldn't build the chart now")
+        finally:
+            try: await wait_m.delete()
+            except Exception as _ex: log.debug('ignored: %s', _ex)
+        return
     if q.data.startswith("pchart:"):
         parts=q.data.split(":"); sym=parts[1]
         if q.from_user.id != ADMIN_ID:
@@ -4224,7 +5075,7 @@ async def cb_handler(update,ctx):
             kb=keyboard(sym,res["tf"],tier,source,lang)
             img=await asyncio.to_thread(render_chart,res,tier)
             await ctx.bot.send_photo(q.message.chat.id,photo=img,protect_content=(st!="admin" and PROTECT),reply_markup=kb)
-            if tier=="admin": await send_admin_copy(q.message,res)
+            if tier=="admin" and not res.get("wait"): await send_admin_copy(q.message,res)
             cur_pts=store.data["users"].get(str(q.from_user.id),{}).get("points",0)
             bot_un=ctx.application.bot_data.get("username","")
             await send_points_flash(q.message,cur_pts,q.from_user.id,bot_un)
@@ -4290,7 +5141,23 @@ def whale_alert_recent(min_usd=1_000_000,minutes=60):
         return out
     except Exception: return []
 
-async def on_error(update,ctx): log.error("err: %s",ctx.error,exc_info=ctx.error)
+async def on_error(update,ctx):
+    err=ctx.error
+    if err.__class__.__name__=="Conflict":
+        log.error("⚠️ 409 Conflict: نسخة أخرى من البوت تعمل بنفس التوكن (Railway: أوقف النشر القديم/اجعل replicas=1، وأوقف أي نسخة محلية)")
+        return
+    log.error("err: %s",err,exc_info=err)
+
+async def log_updates(update,ctx):
+    q=update.callback_query
+    if q: log.info("🔘 callback %s من %s",q.data,q.from_user.id)
+
+async def cmd_botinfo(update,ctx):
+    if update.effective_user.id!=ADMIN_ID: return
+    w=await ctx.bot.get_webhook_info()
+    await update.message.reply_text(
+        f"webhook: {w.url or 'لا يوجد ✅'}\nallowed_updates: {w.allowed_updates or 'الافتراضي ✅'}\n"
+        f"pending: {w.pending_update_count}\nlast_error: {w.last_error_message or '-'}")
 
 async def on_text(update,ctx):
     if not update.message or not update.message.text: return
@@ -4307,6 +5174,8 @@ async def on_text(update,ctx):
         try:
             cap,risk_pct=map(float,text.split())
             res=await asyncio.to_thread(get_analysis,sym,True)
+            if res.get("wait"):
+                await update.message.reply_text("⏳ لا توجد صفقة حالياً لهذه العملة، فلا حساب مخاطر." if lang!="en" else "⏳ No active setup for this coin, so no risk calc."); return
             entry=res['lv']['entry']; sl=res['lv']['sl']
             risk_amount=cap*(risk_pct/100); price_diff=abs(entry-sl)
             position_size=risk_amount/price_diff; position_value=position_size*entry
@@ -4356,7 +5225,7 @@ async def on_text(update,ctx):
         await update.message.reply_photo(photo=img, reply_markup=kb)
         await update.message.reply_text(text_caption, parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
         
-        if tier == "admin":
+        if tier == "admin" and not res.get("wait"):
             await send_admin_copy(update.message, res)
             
         cur_pts=store.data["users"].get(uid,{}).get("points",0)
@@ -4370,9 +5239,70 @@ async def on_text(update,ctx):
         try: await wait.delete()
         except Exception as _ex: log.debug('ignored: %s', _ex)
 
+# ======================= أوامر عامة إضافية (من النسخة الخفيفة) =======================
+def _http_json(url,timeout=15):
+    r=requests.get(url,headers={"User-Agent":"Mozilla/5.0"},timeout=timeout); r.raise_for_status(); return r.json()
+
+def _big(n):
+    for u,d in (("T",1e12),("B",1e9),("M",1e6),("K",1e3)):
+        if abs(n)>=d: return f"{n/d:.2f}{u}"
+    return f"{n:.0f}"
+
+async def cmd_fear(update,ctx):
+    touch_user(update.effective_user,"/fear")
+    try:
+        d=(await asyncio.to_thread(_http_json,"https://api.alternative.me/fng/?limit=2"))["data"]
+        await update.message.reply_text(f"😱 <b>مؤشر الخوف والطمع</b>\nالآن: <b>{d[0]['value']}</b> — {d[0]['value_classification']}\n"
+                                        f"أمس: {d[1]['value']} — {d[1]['value_classification']}",parse_mode=ParseMode.HTML)
+    except Exception: await update.message.reply_text("⚠️ تعذر جلب المؤشر حالياً")
+
+async def cmd_market(update,ctx):
+    touch_user(update.effective_user,"/market")
+    try:
+        g=(await asyncio.to_thread(_http_json,"https://api.coingecko.com/api/v3/global"))["data"]
+        p=g["market_cap_percentage"]
+        await update.message.reply_text(
+            f"🌍 <b>السوق</b>\nالقيمة السوقية: ${_big(g['total_market_cap']['usd'])} "
+            f"({g['market_cap_change_percentage_24h_usd']:+.2f}% / 24س)\n"
+            f"هيمنة BTC: {p.get('btc',0):.1f}% | ETH: {p.get('eth',0):.1f}%\n"
+            f"حجم 24س: ${_big(g['total_volume']['usd'])}",parse_mode=ParseMode.HTML)
+    except Exception: await update.message.reply_text("⚠️ تعذر جلب بيانات السوق حالياً")
+
+async def cmd_top(update,ctx):
+    touch_user(update.effective_user,"/top")
+    try:
+        rows=await asyncio.to_thread(binance_futures_all_tickers)
+        rows=[r for r in (rows or []) if r["volume"]>20e6]
+        rows.sort(key=lambda r:-r["change"])
+        f=lambda r:f"• {r['symbol']}: {r['change']:+.2f}% (${_big(r['volume'])})"
+        await update.message.reply_text("🚀 <b>الأكثر ارتفاعاً</b>\n"+"\n".join(map(f,rows[:7]))+
+                                        "\n\n📉 <b>الأكثر انخفاضاً</b>\n"+"\n".join(map(f,rows[-7:][::-1])),parse_mode=ParseMode.HTML)
+    except Exception: await update.message.reply_text("⚠️ تعذر جلب البيانات حالياً")
+
+async def cmd_tools(update,ctx):
+    touch_user(update.effective_user,"/tools")
+    await update.message.reply_text(
+        "🧰 <b>أدوات مفيدة</b>\n• coinmarketcap.com — الأسعار\n• coingecko.com — بيانات اجتماعية\n"
+        "• tradingview.com — الرسوم والتحليل\n• defillama.com — القيمة المقفلة DeFi\n"
+        "• cryptoquant.com — تحليلات on-chain\n• token.unlocks.app — فتح الرموز\n"
+        "• arkhamintelligence.com — تتبع المحافظ\n• dappradar.com — التطبيقات اللامركزية",
+        parse_mode=ParseMode.HTML,link_preview_options=NO_PREVIEW)
+
+async def cmd_riskcalc(update,ctx):
+    touch_user(update.effective_user,"/risk")
+    try:
+        cap,rk,entry,sl=[float(x) for x in ctx.args[:4]]
+        dist=abs(entry-sl); amt=cap*rk/100; size=amt/dist
+        await update.message.reply_text(f"🧮 <b>حجم الصفقة</b>\nالمخاطرة: ${amt:.2f}\nالكمية: <code>{size:.6g}</code>\n"
+                                        f"قيمة الصفقة: ${size*entry:,.2f}",parse_mode=ParseMode.HTML)
+    except Exception:
+        await update.message.reply_text("الاستخدام: <code>/risk رأس_المال نسبة_المخاطرة دخول وقف</code>\nمثال: /risk 1000 1 65000 63500",
+                                        parse_mode=ParseMode.HTML)
+
 PUBLIC_COMMANDS=[("start","ابدأ / Start"),("help","المساعدة / Help"),("myid","رقمي / My ID"),
                  ("vip","VIP"),("menu","قائمتي / Menu 📋"),("portfolio","محفظتي / Portfolio 📊"),
-                 ("points","نقاطي / Points 🎯"),("myref","رابط الإحالة / Referral 🔗")]
+                 ("points","نقاطي / Points 🎯"),("myref","رابط الإحالة / Referral 🔗"),
+                 ("fear","الخوف والطمع"),("market","حالة السوق"),("top","الأكثر ارتفاعاً"),("risk","حاسبة المخاطر")]
 
 def get_crypto_news(symbol):
     try:
@@ -4383,6 +5313,8 @@ def get_crypto_news(symbol):
     return "لا توجد أخبار هامة حالياً."
 
 async def post_init(app):
+    try: await app.bot.delete_webhook(drop_pending_updates=False)
+    except Exception as _ex: log.debug('ignored: %s', _ex)
     try: await app.bot.set_my_commands([BotCommand(c,d) for c,d in PUBLIC_COMMANDS])
     except Exception as _ex: log.debug('ignored: %s', _ex)
     try:
@@ -4402,7 +5334,7 @@ async def post_init(app):
         asyncio.create_task(whale_hunter_loop(app)),
         asyncio.create_task(weekly_report_loop(app)),asyncio.create_task(trial_notice_loop(app)),
         asyncio.create_task(morning_brief_loop(app))]
-    log.info("ryma v112 | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$500000 | SL≤2.5%% | RR≥1.5 | hype=admin | neon=admin | patterns_chart=admin",
+    log.info("ryma FINAL (engine+always-trade) | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$500000 | SL≤2.5%% | RR≥1.5 | hype=admin | neon=admin | patterns_chart=admin",
              MAX_OPEN,CYCLE_GOLDEN,get_golden_config().get("min_score",1),is_multi_exchange(),
              VIP_THRESHOLD,VIP_REWARD_DAYS)
 
@@ -4432,12 +5364,16 @@ def main():
         ("golden",cmd_golden),("goldenconfig",cmd_goldenconfig),("share",cmd_share),
         ("portfolio",cmd_portfolio),("alpha_v2",cmd_alpha_radar_v2),
         ("patterns",cmd_patterns),("neon",cmd_neon),
-        ("points",cmd_points),("myref",cmd_myref),("addpoints",cmd_addpoints)]
+        ("points",cmd_points),("myref",cmd_myref),("addpoints",cmd_addpoints),
+        ("fear",cmd_fear),("market",cmd_market),("top",cmd_top),("tools",cmd_tools),("risk",cmd_riskcalc)]
     for name,fn in handlers: app.add_handler(CommandHandler(name,fn))
+    app.add_handler(TypeHandler(Update,log_updates),group=-1)
+    app.add_handler(CommandHandler("botinfo",cmd_botinfo))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,on_text))
     app.add_error_handler(on_error)
-    app.run_polling(drop_pending_updates=True)
+    # allowed_updates صريحة: تيليغرام يتذكر آخر قيمة، وأي نسخة قديمة طلبت message فقط تُسقط callback_query (الأزرار)
+    app.run_polling(allowed_updates=Update.ALL_TYPES,drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
