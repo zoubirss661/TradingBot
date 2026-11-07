@@ -145,7 +145,7 @@ SMART_FILL_TRIGGER=0.8; CLEANUP_EVERY_CYCLES=12
 PIVOT_WINDOW=100; PIVOT_LOOKBACK=3; MIN_PIVOT_DIST=0.5
 CORE_SL_MAX=2.5; CORE_SL_MIN=1.5
 MAX_TP_ATR = 6.0; MIN_RR_TP1 = 1.5
-CORE_TP_FRACS=[0.25,0.25,0.25,0.25]
+CORE_TP_FRACS=[0.50,0.25,0.15,0.10]
 BE_TRIGGER_R=0.1; TRAIL_ATR=3.0; MAX_HOLD=60
 CORE_VOL_MULT=0.7; CORE_RSI_LONG=(35,70); CORE_RSI_SHORT=(50,80); EXT_MAX_ATR=3.5
 MIN_DAILY_VOLUME_USD=5_000_000; VIP_MIN_LIQUIDITY=3_000_000; REQUIRE_MTF_FOR_SMALL=True
@@ -257,7 +257,8 @@ def set_user_lang(uid,lang):
     with store.lock:
         if str(uid) in store.data["users"]:
             store.data["users"][str(uid)]["lang"]=lang; store.save("users")
-            TEXTS = {
+
+TEXTS = {
     "ar": {
         "analyzing": "⏳ جارٍ تحليل {sym}...",
         "not_found": "❌ لم يتم العثور على العملة: {sym}",
@@ -446,7 +447,6 @@ async def send_points_flash(msg_obj,pts,uid,bot_username=None):
         try: await sent.edit_text(final,parse_mode=ParseMode.HTML,link_preview_options=NO_PREVIEW)
         except Exception as _ex: log.debug('ignored: %s', _ex)
     except Exception as e: log.warning(f"send_points_flash: {e}")
-
 def binance_futures_klines(sym,tf,bars=500):
     interval=BINANCE_INTERVAL_MAP.get(tf)
     if not interval: return None
@@ -798,7 +798,7 @@ def futures_signal(sym):
                     price=price,oi=oi,fr=fr,ls=ls)
     except Exception: return None
 
-    _futures_score_cache={}
+_futures_score_cache={}
 def futures_score_for(sym,side):
     key=(sym,side)
     if len(_futures_score_cache)>400: _futures_score_cache.clear()
@@ -1013,7 +1013,7 @@ def build_hype_radar_text(results):
         if r["is_web3"]: web3_count += 1
     lines.append(f"📈 إجمالي: {len(results)} | 🌐 Web3: {web3_count}")
     return "\n".join(lines)
-    _top_cache=[0,[]]
+_top_cache=[0,[]]
 def top_symbols(n=60,binance_only=False):
     if not binance_only and time.time()-_top_cache[0]<1800 and _top_cache[1]: return _top_cache[1][:n]
     try:
@@ -1102,40 +1102,65 @@ def add_indicators(df,atrp_win=100):
     df["lowest_10"]=df["low"].rolling(10).min()
     return df
 
-def get_tf_view(df):
-    closes = df["close"]
-    e20 = ema(closes, 20).iloc[-1]
-    e50 = ema(closes, 50).iloc[-1]
-    e200 = ema(closes, 200).iloc[-1]
-    price = closes.iloc[-1]
-    r = rsi_calc(closes).iloc[-1]
-    _, _, hist = macd_calc(closes)
-    hist_now = hist.iloc[-1]
-    hist_prev = hist.iloc[-2] if len(hist) > 1 else 0
-    if price > e50 and e20 > e50: trend = 1
-    elif price < e50 and e20 < e50: trend = -1
-    else: trend = 0
-    vols = df["volume"].iloc[-21:-1]
-    vr = df["volume"].iloc[-1] / vols.mean() if vols.mean() > 0 else 1
-    return {"price": price, "e20": e20, "e50": e50, "e200": e200, "rsi": r,
-            "hist": hist_now, "hist_prev": hist_prev, "trend": trend,
-            "above200": price > e200, "atr": df["atr"].iloc[-1], "vr": vr}
+def detect_trend(df,i):
+    if i<50: return "unknown"
+    r=df.iloc[i]
+    if pd.isna(r["ema20"]) or pd.isna(r["ema50"]) or pd.isna(r["ema200"]): return "unknown"
+    if r["ema20"]>r["ema50"]>r["ema200"] and r["close"]>r["ema20"]: return "strong_up"
+    if r["ema20"]>r["ema50"] and r["close"]>r["ema200"]: return "up"
+    if r["ema20"]<r["ema50"]<r["ema200"] and r["close"]<r["ema20"]: return "strong_down"
+    if r["ema20"]<r["ema50"] and r["close"]<r["ema200"]: return "down"
+    return "range"
 
-def build_signal(views, funding):
-    score = 0.0; notes = []
-    w = {"1d": 2.0, "4h": 2.0, "1h": 1.0}
-    for tf, wt in w.items(): score += wt * views[tf]["trend"]
-    v4 = views["4h"]
-    if v4["rsi"] > 72: score -= 0.5; notes.append("RSI على 4س في تشبع شراء")
-    elif v4["rsi"] < 28: score += 0.5; notes.append("RSI على 4س في تشبع بيع")
-    if v4["hist"] > 0 and v4["hist"] > v4["hist_prev"]: score += 1; notes.append("زخم MACD إيجابي")
-    elif v4["hist"] < 0 and v4["hist"] < v4["hist_prev"]: score -= 1; notes.append("زخم MACD سلبي")
-    if views["1d"]["above200"]: score += 0.5
-    else: score -= 0.5
-    if funding is not None:
-        if funding > 0.05: score -= 0.5; notes.append("التمويل مرتفع جداً")
-        elif funding < -0.03: score += 0.5; notes.append("التمويل سلبي")
-    return score, notes
+def daily_bias(df_d):
+    try:
+        if df_d is None or len(df_d)<200: return 0
+        last=df_d.iloc[-1]; c=float(last["close"])
+        e20=float(last["ema20"]) if not pd.isna(last["ema20"]) else c
+        e50=float(last["ema50"]) if not pd.isna(last["ema50"]) else c
+        e200=float(last["ema200"]) if not pd.isna(last["ema200"]) else c
+        rsi_v=float(last["rsi"]) if not pd.isna(last["rsi"]) else 50
+        score=0
+        if c<e50: score-=1
+        if c<e200: score-=1
+        if c>e50: score+=1
+        if c>e200: score+=1
+        if e20<e50: score-=1
+        if e50<e200: score-=1
+        if e20>e50: score+=1
+        if e50>e200: score+=1
+        if rsi_v<45: score-=1
+        if rsi_v>55: score+=1
+        try:
+            change_7d=(c/float(df_d["close"].iloc[-8])-1)*100
+            if change_7d<-5: score-=1
+            if change_7d>5: score+=1
+        except Exception as _ex: log.debug('ignored: %s', _ex)
+        if score<=-2: return -1
+        if score>=2: return 1
+        return 0
+    except Exception: return 0
+
+def mtf_score(sym,side):
+    try:
+        if sym in MAJORS: tfs=["1d","4h"]
+        elif sym in MEME_COINS: tfs=["4h","1d"]
+        else: tfs=["4h","1h","1d"]
+        confirms=0; total=0
+        for tf in tfs:
+            try:
+                df=get_candles(sym,tf,250,ttl=300,min_bars=100)
+                df=add_indicators(df,100); last=df.iloc[-1]
+                if pd.isna(last["ema50"]) or pd.isna(last["ema200"]): continue
+                total+=1
+                if side==1:
+                    if last["close"]>last["ema50"] and last["close"]>last["ema200"]: confirms+=1
+                else:
+                    if last["close"]<last["ema50"] and last["close"]<last["ema200"]: confirms+=1
+            except Exception: continue
+        if total==0: return 0,0
+        return confirms,total
+    except Exception: return 0,0
 
 def find_pivots(df,window=PIVOT_WINDOW,lookback=PIVOT_LOOKBACK):
     try:
@@ -1154,6 +1179,118 @@ def find_pivots(df,window=PIVOT_WINDOW,lookback=PIVOT_LOOKBACK):
         highs.sort(reverse=True); lows.sort(reverse=True)
         return highs,lows
     except Exception: return [],[]
+
+def select_targets(pivots,price,side,min_dist_pct=MIN_PIVOT_DIST):
+    selected=[]
+    ordered=sorted(set(pivots)) if side==1 else sorted(set(pivots),reverse=True)
+    for p in ordered:
+        if side==1:
+            if p<=price*(1+min_dist_pct/100): continue
+            if selected and p<=selected[-1]*(1+min_dist_pct/100): continue
+            selected.append(p)
+        else:
+            if p>=price*(1-min_dist_pct/100): continue
+            if selected and p>=selected[-1]*(1-min_dist_pct/100): continue
+            selected.append(p)
+        if len(selected)>=4: break
+    return selected
+
+def compute_core_levels(df, i, side, price=None):
+    try:
+        r = df.iloc[i]; atr = float(r["atr"]) if not pd.isna(r["atr"]) else 0
+        if atr <= 0: return None
+        entry = float(price) if price else float(r["close"])
+        
+        recent_df = df.tail(100)
+        if side == 1:
+            resistances = recent_df[recent_df["high"] > entry]["high"].unique()
+            targets = sorted([float(x) for x in resistances if float(x) > entry + (atr*0.5)])[:4]
+        else:
+            supports = recent_df[recent_df["low"] < entry]["low"].unique()
+            targets = sorted([float(x) for x in supports if float(x) < entry - (atr*0.5)], reverse=True)[:4]
+
+        if len(targets) < 4:
+            last_px = targets[-1] if targets else entry
+            while len(targets) < 4:
+                next_px = last_px + side * atr * 1.5
+                targets.append(next_px)
+                last_px = next_px
+
+        targets = targets[:4]
+        
+        lookback_df = df.tail(15)
+        swing = float(lookback_df["low"].min()) if side==1 else float(lookback_df["high"].max())
+        sl_raw = swing - 0.1*atr if side==1 else swing + 0.1*atr
+        dist_raw = abs(entry - sl_raw)
+        
+        dist = max(dist_raw, entry*CORE_SL_MIN/100)
+        dist = min(dist, entry*CORE_SL_MAX/100)
+        sl = entry - side * dist; risk = abs(entry - sl)
+        if risk <= 0: return None
+
+        min_tp1_dist = risk * MIN_RR_TP1
+        if side == 1:
+            if targets[0] < entry + min_tp1_dist:
+                targets[0] = entry + min_tp1_dist
+            for k in range(1, 4):
+                if targets[k] <= targets[k-1]:
+                    targets[k] = targets[k-1] + atr * 0.5
+        else:
+            if targets[0] > entry - min_tp1_dist:
+                targets[0] = entry - min_tp1_dist
+            for k in range(1, 4):
+                if targets[k] >= targets[k-1]:
+                    targets[k] = targets[k-1] - atr * 0.5
+
+        tps = []
+        for idx, px in enumerate(targets):
+            pct = 100 * side * (px - entry) / entry
+            frac = CORE_TP_FRACS[idx] if idx < len(CORE_TP_FRACS) else 0
+            tps.append(dict(px=float(px), pct=round(pct,2), frac=frac, hit=False, src=""))
+            
+        return dict(entry=entry, sl=sl, risk=risk, tps=tps, atr=atr)
+    except Exception: return None
+
+def compute_meme_levels(df,i,side,price=None):
+    try:
+        r=df.iloc[i]; entry=float(price) if price else float(r["close"])
+        sl=entry*(1-side*MEME_SL_PCT/100); risk=abs(entry-sl)
+        if risk<=0: return None
+        tps=[]
+        for pct,f in zip(MEME_TP_PCTS,MEME_TP_FRACS):
+            px=entry*(1+side*pct/100)
+            tps.append(dict(px=float(px),pct=pct,frac=f,hit=False,src=""))
+        atr=float(r["atr"]) if not pd.isna(r["atr"]) else 0
+        return dict(entry=entry,sl=sl,risk=risk,tps=tps,atr=atr)
+    except Exception: return None
+
+def detect_core_conditions(df,i,side):
+    if i<30: return False
+    r=df.iloc[i]
+    if pd.isna(r.rsi) or pd.isna(r.ema20) or pd.isna(r.ema50) or pd.isna(r.rvol): return False
+    if side==1:
+        if not (CORE_RSI_LONG[0]<=r.rsi<=CORE_RSI_LONG[1]): return False
+        if not (r.ema20>r.ema50*0.99 and r.close>r.ema50*0.99): return False
+    else:
+        if not (CORE_RSI_SHORT[0]<=r.rsi<=CORE_RSI_SHORT[1]): return False
+        if not (r.ema20<r.ema50*1.01 and r.close<r.ema50*1.01): return False
+    if r.rvol<CORE_VOL_MULT: return False
+    if abs(r.ext_atr)>EXT_MAX_ATR: return False
+    return True
+
+def detect_meme_conditions(df,i,side):
+    if i<MEME_BREAKOUT_BARS+5: return False
+    r=df.iloc[i]
+    if pd.isna(r.rsi) or pd.isna(r.rvol): return False
+    if not (MEME_RSI_LOW<=r.rsi<=MEME_RSI_HIGH): return False
+    if r.rvol<MEME_VOL_MULT: return False
+    rh=float(df["high"].iloc[i-MEME_BREAKOUT_BARS:i].max())
+    rl=float(df["low"].iloc[i-MEME_BREAKOUT_BARS:i].min())
+    if side==1:
+        if float(r.close)<=rh: return False
+    else:
+        if float(r.close)>=rl: return False
+    return True
 
 def _find_pattern_pivots(df,left=5,right=5,max_pivots=8):
     highs,lows=[],[]; n=len(df)
@@ -1422,47 +1559,54 @@ def analyze(sym):
         except PairNotFound: raise
         except NoData as e: last_err=e; continue
     if df is None: raise last_err or NoData(sym)
-    
-    df=add_indicators(df,100)
-    df_1d=get_candles(sym,"1d",250); df_1d=add_indicators(df_1d,100)
-    df_4h=get_candles(sym,"4h",250); df_4h=add_indicators(df_4h,100)
-    df_1h=get_candles(sym,"1h",250); df_1h=add_indicators(df_1h,100)
-    
-    views = {"1d": get_tf_view(df_1d), "4h": get_tf_view(df_4h), "1h": get_tf_view(df_1h)}
-    price,_ = live_price(sym); price = float(price or views["1h"]["price"])
-    funding = futures_funding_rate(sym)
-    
-    score, notes = build_signal(views, funding)
-    if score >= 3: side = 1
-    elif score <= -3: side = -1
-    else: side = 0
-    
-    atr4 = views["4h"]["atr"]
-    if side == 1:
-        sl = price - 1.5 * atr4; risk = price - sl
-        tps = [price + risk * m for m in [1.2, 2.0, 3.0, 4.5]]
-    elif side == -1:
-        sl = price + 1.5 * atr4; risk = sl - price
-        tps = [price - risk * m for m in [1.2, 2.0, 3.0, 4.5]]
+    degraded=bool(df.attrs.get("degraded"))
+    df=add_indicators(df,100); i=len(df)-1
+    is_meme=sym in MEME_COINS
+    if is_meme:
+        long_ok=detect_meme_conditions(df,i,1); short_ok=detect_meme_conditions(df,i,-1)
+        strategy="Meme"
     else:
-        sl = price - 1.5 * atr4; risk = abs(price - sl)
-        tps = [price + risk * m for m in [1.2, 2.0, 3.0, 4.5]]
+        long_ok=detect_core_conditions(df,i,1); short_ok=detect_core_conditions(df,i,-1)
+        strategy="Core"
+    price,_=live_price(sym); price=float(price or df["close"].iloc[-1])
+    trend=detect_trend(df,i); df_d=None
+    try:
+        df_d=get_candles(sym,"1d",250,ttl=300,min_bars=100); df_d=add_indicators(df_d,100)
+    except Exception as _ex: log.debug('ignored: %s', _ex)
+    bias_d=daily_bias(df_d) if df_d is not None else 0
+    side=decide_side(df,i,trend,bias_d,long_ok,short_ok)
+    try: fut=futures_score_for(sym,side)
+    except Exception: fut=dict(score=0,details=[])
+    fut_score=fut.get("score",0)
+    try:
+        all_pats=[]; seen_names=set()
+        for pat_tf in ["1d","4h","1h"]:
+            try:
+                if pat_tf==tf: p_df=df
+                else:
+                    p_df=get_candles(sym,pat_tf,300,ttl=600,min_bars=100); p_df=add_indicators(p_df,100)
+                pats=detect_all_patterns(p_df,pat_tf)
+                for p in pats:
+                    key=f"{p['name']}"
+                    if key not in seen_names: seen_names.add(key); all_pats.append(p)
+            except Exception: continue
+        patterns=all_pats
+    except Exception: patterns=[]
+    grade=grade_setup(df,i,side,futures_score=fut_score,patterns=patterns)
+    lv=(compute_meme_levels(df,i,side,price) if is_meme else compute_core_levels(df,i,side,price))
+    if lv is None: raise NoData(sym)
+    candle=detect_candle_pattern(df,i); sr_high,sr_low=find_sr_levels(df); fibs=fib_levels(df)
+    last=df.iloc[-1]
+    return dict(sym=sym,tf=tf,df=df,side=side,strategy=strategy,
+                rank={"A+":3,"A":2,"B":1,"C":0}.get(grade,0),grade=grade,setup=strategy,
+                ok=1 if grade in ("A+","A","B") else 0,total=4,
+                lv=lv,price=price,degraded=degraded,source=df.attrs.get("source","binance_fut"),
+                bar_t=int(last["t"]),rsi=float(last["rsi"]) if not pd.isna(last["rsi"]) else 50.0,
+                macd=float(last["macd"]) if not pd.isna(last["macd"]) else 0.0,
+                candle=candle,trend=trend,trend_d=("down" if bias_d==-1 else ("up" if bias_d==1 else "range")),
+                sr_high=sr_high[:3],sr_low=sr_low[:3],fibs=fibs,
+                fut_score=fut_score,fut_details=fut.get("details",[]),patterns=patterns)
 
-    tps_list = [dict(px=float(t), pct=round((t-price)/price*100*side, 2), frac=0.25, hit=False, src="") for t in tps]
-    lv = dict(entry=price, sl=sl, risk=risk, tps=tps_list, atr=atr4)
-    
-    grade = "A+" if abs(score) >= 5 else ("A" if abs(score) >= 4 else ("B" if abs(score) >= 2 else "C"))
-    patterns = detect_all_patterns(df, tf)
-    
-    return dict(sym=sym, tf=tf, df=df, side=side, strategy="Core",
-                rank={"A+":3,"A":2,"B":1,"C":0}.get(grade,0), grade=grade, setup="Core",
-                ok=1 if grade in ("A+","A","B") else 0, total=4,
-                lv=lv, price=price, degraded=False, source=df.attrs.get("source","binance_fut"),
-                bar_t=int(df["t"].iloc[-1]), rsi=views["4h"]["rsi"], macd=views["4h"]["hist"],
-                candle=detect_candle_pattern(df, len(df)-1), trend="strong_up" if views["4h"]["trend"]==1 else "down",
-                trend_d="up" if views["1d"]["trend"]==1 else "down",
-                sr_high=[], sr_low=[], fibs=[],
-                fut_score=score, fut_details=notes, patterns=patterns)
 def get_analysis(sym,force=False):
     if len(_analysis_cache)>300: _analysis_cache.clear()
     hit=_analysis_cache.get(sym)
@@ -1946,52 +2090,77 @@ def render_pattern_chart(res, tier="free"):
     fig=_new_fig(12,8,bg)
     ax=fig.add_axes([0.065,0.10,0.80,0.80])
     _draw_candles(ax,df,"#26a69a","#ef5350")
-    sr_high = res.get("sr_high", []); sr_low = res.get("sr_low", [])
+    
+    sr_high = res.get("sr_high", [])
+    sr_low = res.get("sr_low", [])
     for lvl in sr_high:
         ax.axhline(lvl, color="#ef5350", lw=1.5, ls="--", alpha=0.7, zorder=4)
         ax.text(n+1, lvl, f" RES {fmt(lvl)}", color="#ef5350", va="center", fontsize=9)
     for lvl in sr_low:
         ax.axhline(lvl, color="#2962ff", lw=1.5, ls="--", alpha=0.7, zorder=4)
         ax.text(n+1, lvl, f" SUP {fmt(lvl)}", color="#2962ff", va="center", fontsize=9)
+
     col_map={"bullish":"#22c55e","bearish":"#facc15","neck":"#facc15","neutral":"#facc15"}
     ys=[float(df["low"].min()),float(df["high"].max())]
     pats=res.get("patterns",[])
+    
     for p in pats:
-        pname = p.get('name', ''); pseg = p.get("segments", [])
-        if pname in ["Ascending Triangle", "Descending Triangle", "Symmetrical Triangle", "Rising Wedge", "Falling Wedge"] and len(pseg) >= 2:
+        pname = p.get('name', '')
+        pseg = p.get("segments", [])
+        
+        if pname in ["Ascending Triangle", "Descending Triangle", "Symmetrical Triangle",
+                     "Rising Wedge", "Falling Wedge"] and len(pseg) >= 2:
             top = pseg[0]; bot = pseg[1]
             x1_top = _x_index(t_arr, top["t1"]); x2_top = _x_index(t_arr, top["t2"])
             x1_bot = _x_index(t_arr, bot["t1"]); x2_bot = _x_index(t_arr, bot["t2"])
-            poly_x = [x1_top, x2_top, x2_bot, x1_bot]; poly_y = [top["p1"], top["p2"], bot["p2"], bot["p1"]]
+            poly_x = [x1_top, x2_top, x2_bot, x1_bot]
+            poly_y = [top["p1"], top["p2"], bot["p2"], bot["p1"]]
             fill_col = col_map.get(p["bias"], "#facc15")
-            ax.add_patch(Polygon(list(zip(poly_x, poly_y)), closed=True, facecolor=fill_col, alpha=0.18, edgecolor=fill_col, linewidth=2.2, zorder=5))
-            ax.plot([x1_top, x2_top], [top["p1"], top["p2"]], color=fill_col, lw=2.5, zorder=6, solid_capstyle="round")
-            ax.plot([x1_bot, x2_bot], [bot["p1"], bot["p2"]], color=fill_col, lw=2.5, zorder=6, solid_capstyle="round")
+            ax.add_patch(Polygon(list(zip(poly_x, poly_y)), closed=True,
+                                 facecolor=fill_col, alpha=0.18, edgecolor=fill_col,
+                                 linewidth=2.2, zorder=5))
+            ax.plot([x1_top, x2_top], [top["p1"], top["p2"]], color=fill_col,
+                    lw=2.5, zorder=6, solid_capstyle="round")
+            ax.plot([x1_bot, x2_bot], [bot["p1"], bot["p2"]], color=fill_col,
+                    lw=2.5, zorder=6, solid_capstyle="round")
             ys += [top["p1"], top["p2"], bot["p1"], bot["p2"]]
         else:
             for s in pseg:
-                x1 = _x_index(t_arr, s["t1"]); x2 = (n+5) if s["ext"] else _x_index(t_arr, s["t2"])
+                x1 = _x_index(t_arr, s["t1"])
+                x2 = (n+5) if s["ext"] else _x_index(t_arr, s["t2"])
                 seg_col = col_map.get(s["color"], "#facc15")
-                ax.plot([x1,x2],[s["p1"],s["p2"]], color=seg_col, lw=2.5, solid_capstyle="round", zorder=6, path_effects=[pe.withStroke(linewidth=6, foreground=seg_col, alpha=0.2), pe.Normal()])
+                ax.plot([x1,x2],[s["p1"],s["p2"]], color=seg_col, lw=2.5,
+                        solid_capstyle="round", zorder=6,
+                        path_effects=[pe.withStroke(linewidth=6, foreground=seg_col, alpha=0.2), pe.Normal()])
                 ys += [s["p1"], s["p2"]]
+        
         for m in p.get("marks", []):
             xm = _x_index(t_arr, m["t"]); c = col_map.get(p["bias"], "#facc15")
             ax.scatter([xm], [m["p"]], s=70, color=c, edgecolor="white", linewidth=1.5, zorder=7)
-            ax.annotate(m["label"], (xm, m["p"]), xytext=(0, 12 if p["bias"]=="bearish" else -15), textcoords="offset points", ha="center", fontsize=10, color="white", fontweight="bold", bbox=dict(boxstyle="round,pad=0.3", fc="#1c2230", ec=c, lw=1.2), zorder=8)
+            ax.annotate(m["label"], (xm, m["p"]), xytext=(0, 12 if p["bias"]=="bearish" else -15),
+                        textcoords="offset points", ha="center", fontsize=10, color="white",
+                        fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.3", fc="#1c2230", ec=c, lw=1.2), zorder=8)
+                        
     n_tps=4 if tier in ("admin","vip") else 2
     levels=[("ENTRY",lv["entry"],"#5c9dff","-."),("STOP",lv["sl"],"#ff5252","--")]
-    for j,tp in enumerate(lv["tps"][:n_tps],1): levels.append((f"TP{j}",tp["px"],"#26a69a","--"))
-    for name,px,col,ls in levels: ax.axhline(px,color=col,lw=1.8,ls=ls,zorder=5); ys.append(px)
+    for j,tp in enumerate(lv["tps"][:n_tps],1):
+        levels.append((f"TP{j}",tp["px"],"#26a69a","--"))
+    for name,px,col,ls in levels:
+        ax.axhline(px,color=col,lw=1.8,ls=ls,zorder=5); ys.append(px)
     lo,hi=min(ys),max(ys)
     if hi<=lo: hi=lo+1e-6
-    pad=(hi-lo)*0.07; ylo,yhi=lo-pad,hi+pad
+    pad=(hi-lo)*0.07
+    ylo,yhi=lo-pad,hi+pad
     ax.set_ylim(ylo,yhi); ax.set_xlim(-1,n+12)
     _right_labels(ax,levels,n,ylo,yhi)
     _style_axes([ax],bg,fg,grid); _time_ticks(ax,df)
     if pats:
         legend_lines=[f"● {p['name']}  [{p.get('tf','').upper()}]  {p['bias'].capitalize()}" for p in pats[:4]]
-        ax.text(0.01,0.90,"\n".join(legend_lines),transform=ax.transAxes,va="top",ha="left", fontsize=10,color=fg,bbox=dict(boxstyle="round,pad=0.4",fc="#1c2230",ec=grid))
-    fig.text(0.065,0.945,f"{sym}/USDT  ·  {tf.upper()}  ·  {'LONG' if side == 1 else 'SHORT'}", fontsize=18,fontweight="bold",color="#26a69a" if side==1 else "#ff5252",ha="left")
+        ax.text(0.01,0.90,"\n".join(legend_lines),transform=ax.transAxes,va="top",ha="left",
+                fontsize=10,color=fg,bbox=dict(boxstyle="round,pad=0.4",fc="#1c2230",ec=grid))
+    fig.text(0.065,0.945,f"{sym}/USDT  ·  {tf.upper()}  ·  {'LONG' if side == 1 else 'SHORT'}",
+             fontsize=18,fontweight="bold",color="#26a69a" if side==1 else "#ff5252",ha="left")
     fig.text(0.5,0.5,"Ryma Crypto",fontsize=64,color="#ffffff",alpha=0.035,ha="center",va="center",rotation=20,fontweight="bold")
     fig.text(0.065,0.012,"Automated analysis  ·  Source: Binance Live Data",fontsize=9,color="#94a3b8",ha="left")
     fig.text(0.985,0.012,"Ryma Crypto",fontsize=11,color="#c9a227",ha="right",fontweight="bold")
@@ -2015,10 +2184,13 @@ def render_trade_card(res,tier="free"):
     ax.text(0.5,0.878,"Automated Signal Card  ·  Binance Futures",ha="center",va="center",color="#94a3b8",fontsize=12,zorder=4)
     ax.text(0.5,0.79,f"{sym}",ha="center",va="center",color="#ffffff",fontsize=60,fontweight="bold",zorder=4)
     ax.text(0.5,0.725,"/USDT PERPETUAL",ha="center",va="center",color="#94a3b8",fontsize=14,zorder=4)
-    ax.add_patch(FancyBboxPatch((0.36,0.615),0.28,0.07,boxstyle="round,pad=0,rounding_size=0.015", fc="#06150f" if is_long else "#150609",ec=accent,lw=2.0,zorder=3))
-    ax.text(0.5,0.65,"▲ LONG" if is_long else "▼ SHORT",ha="center",va="center",color=accent, fontsize=24,fontweight="bold",zorder=4,path_effects=glow)
+    ax.add_patch(FancyBboxPatch((0.36,0.615),0.28,0.07,boxstyle="round,pad=0,rounding_size=0.015",
+                                fc="#06150f" if is_long else "#150609",ec=accent,lw=2.0,zorder=3))
+    ax.text(0.5,0.65,"▲ LONG" if is_long else "▼ SHORT",ha="center",va="center",color=accent,
+            fontsize=24,fontweight="bold",zorder=4,path_effects=glow)
     def box(x,y,w,h,label,value,col,dim=False):
-        ax.add_patch(FancyBboxPatch((x,y),w,h,boxstyle="round,pad=0,rounding_size=0.012", fc="#0b1220",ec=col if not dim else "#334155",lw=1.6,zorder=2))
+        ax.add_patch(FancyBboxPatch((x,y),w,h,boxstyle="round,pad=0,rounding_size=0.012",
+                                    fc="#0b1220",ec=col if not dim else "#334155",lw=1.6,zorder=2))
         if not dim: ax.add_patch(Rectangle((x+0.012,y+h-0.01),w-0.024,0.008,color=col,zorder=3))
         ax.text(x+w/2,y+h*0.72,label,ha="center",va="center",color="#94a3b8" if not dim else "#475569",fontsize=12,zorder=4)
         tt=ax.text(x+w/2,y+h*0.33,value,ha="center",va="center",color=col if not dim else "#475569",fontsize=24,fontweight="bold",zorder=4)
@@ -2034,8 +2206,10 @@ def render_trade_card(res,tier="free"):
     else:
         box(xs[1],0.20,w,h,"TARGET 3","VIP","#334155",dim=True)
         box(xs[2],0.20,w,h,"TARGET 4","VIP","#334155",dim=True)
-    ax.text(0.5,0.10,f"R:R  {rr:.1f}:1     ·     GRADE  {grade}     ·     TIMEFRAME  {tf.upper()}", ha="center",va="center",color="#e2e8f0",fontsize=14,fontweight="bold",zorder=4)
-    ax.text(0.5,0.045,"Source: Binance Live Data  ·  Trading involves risk  ·  Not financial advice", ha="center",va="center",color="#64748b",fontsize=10,zorder=4)
+    ax.text(0.5,0.10,f"R:R  {rr:.1f}:1     ·     GRADE  {grade}     ·     TIMEFRAME  {tf.upper()}",
+            ha="center",va="center",color="#e2e8f0",fontsize=14,fontweight="bold",zorder=4)
+    ax.text(0.5,0.045,"Source: Binance Live Data  ·  Trading involves risk  ·  Not financial advice",
+            ha="center",va="center",color="#64748b",fontsize=10,zorder=4)
     return _to_png(fig)
 
 def caption_core(res,tier="free",lang="ar"):
@@ -2043,6 +2217,7 @@ def caption_core(res,tier="free",lang="ar"):
     if lang=="en":
         side_word="🟢 LONG" if side==1 else "🔴 SHORT"
         decision="🟢 Buy" if side==1 else "🔴 Sell"
+        now_ts=dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         source=display_source(res.get("source","binance_fut"))
         cl=coin_link(sym,res.get("source","binance_fut"))
         grade=res.get("grade","?")
@@ -2064,8 +2239,10 @@ def caption_core(res,tier="free",lang="ar"):
         lines+=["","━━━━━━━━━━━━━━━━",f"🎯 <b>Expected Decision: {decision}</b>"]
         lines+=["",RISK_WARNING_EN,f"👤 {BRAND}"]
         return "\n".join(lines)
+        
     side_word="🟢 شراء (LONG)" if side==1 else "🔴 بيع (SHORT)"
     decision="🟢 شراء" if side==1 else "🔴 بيع"
+    now_ts=dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     source=display_source(res.get("source","binance_fut"))
     cl=coin_link(sym,res.get("source","binance_fut"))
     grade=res.get("grade","?")
@@ -2111,10 +2288,13 @@ def keyboard_vip(sym,tf,source="binance_fut",lang="en"):
 def keyboard_admin(sym,tf,source="binance_fut",lang="en"):
     ar = (lang == "ar")
     return InlineKeyboardMarkup([
-        [_btn("🧮 حاسبة المخاطر" if ar else "🧮 Risk Calc",callback_data=f"calc_risk:{sym}"), _btn("📊 محفظتي" if ar else "📊 Portfolio",callback_data="my_portfolio")],
+        [_btn("🧮 حاسبة المخاطر" if ar else "🧮 Risk Calc",callback_data=f"calc_risk:{sym}"),
+         _btn("📊 محفظتي" if ar else "📊 Portfolio",callback_data="my_portfolio")],
         [_btn("🌐 جميع المنصات" if ar else "🌐 All Platforms",callback_data=f"refs:{source}")],
-        [_btn("📊 المؤشرات" if ar else "📊 Indicators",callback_data=f"ind:{sym}:{tf}"), _btn("💧 السيولة" if ar else "💧 Liquidity",callback_data=f"liq:{sym}")],
-        [_btn("🐋 الحيتان" if ar else "🐋 Whales",callback_data=f"whale:{sym}"), _btn("🕯️ النماذج" if ar else "🕯️ Patterns",callback_data=f"pat:{sym}")],
+        [_btn("📊 المؤشرات" if ar else "📊 Indicators",callback_data=f"ind:{sym}:{tf}"),
+         _btn("💧 السيولة" if ar else "💧 Liquidity",callback_data=f"liq:{sym}")],
+        [_btn("🐋 الحيتان" if ar else "🐋 Whales",callback_data=f"whale:{sym}"),
+         _btn("🕯️ النماذج" if ar else "🕯️ Patterns",callback_data=f"pat:{sym}")],
         [_btn("🖼️ شارت النماذج (أدمن)" if ar else "🖼️ Patterns Chart (Admin)",callback_data=f"pchart:{sym}:{tf}")],
         [_btn("💳 بطاقة النيون" if ar else "💳 Neon Card",callback_data=f"neon:{sym}")],
         [_btn("🔥 رادار الضجة" if ar else "🔥 Hype Radar",callback_data="hype_radar")],
@@ -2409,7 +2589,8 @@ def render_result_card(coin,tf,side,e,trade):
     accent="#00ff9c" if good else "#ff4d6d"
     fig=_new_fig(12,6.4,"#050a10")
     ax=fig.add_axes([0,0,1,1]); ax.set_xlim(0,1); ax.set_ylim(0,1); ax.axis("off")
-    ax.add_patch(FancyBboxPatch((0.012,0.02),0.976,0.96,boxstyle="round,pad=0,rounding_size=0.03", fc="#0b1220",ec=accent,lw=2.2,zorder=1))
+    ax.add_patch(FancyBboxPatch((0.012,0.02),0.976,0.96,boxstyle="round,pad=0,rounding_size=0.03",
+                                fc="#0b1220",ec=accent,lw=2.2,zorder=1))
     glow=[pe.withStroke(linewidth=6,foreground=accent,alpha=0.18),pe.Normal()]
     ax.text(0.5,0.84,"RYMA CRYPTO  ·  RESULT",ha="center",va="center",color=accent,fontsize=22,fontweight="bold",zorder=4,path_effects=glow)
     ax.text(0.5,0.68,f"{coin}/USDT  ·  {'LONG' if side==1 else 'SHORT'}  ·  {tf.upper()}",ha="center",va="center",color="#e2e8f0",fontsize=20,fontweight="bold",zorder=4)
@@ -2419,7 +2600,8 @@ def render_result_card(coin,tf,side,e,trade):
     if closed: lines.append(f"Result: {rr:+.2f} R")
     for k,line in enumerate(lines):
         ax.text(0.5,0.32-0.08*k,line,ha="center",va="center",color="#e2e8f0",fontsize=18,zorder=4)
-    ax.text(0.5,0.08,"Source: Binance Live Data  ·  Trading involves risk  ·  Not financial advice", ha="center",va="center",color="#64748b",fontsize=10,zorder=4)
+    ax.text(0.5,0.08,"Source: Binance Live Data  ·  Trading involves risk  ·  Not financial advice",
+            ha="center",va="center",color="#64748b",fontsize=10,zorder=4)
     return _to_png(fig)
 
 async def send_result_image(bot,img_buf,free_ok):
@@ -2661,8 +2843,11 @@ async def whale_hunter_loop(app):
             if _whale_day["date"] != today:
                 _whale_day["date"] = today
                 _whale_day["count"] = 0
+            
             if _whale_day["count"] >= 5:
-                await asyncio.sleep(300); continue
+                await asyncio.sleep(300)
+                continue
+
             syms=await asyncio.to_thread(top_symbols,20)
             for s in syms[:10]:
                 if _whale_day["count"] >= 5: break
@@ -2676,11 +2861,15 @@ async def whale_hunter_loop(app):
                             trade_id=f"{s}_{tr.get('id')}"
                             if trade_id in _seen_whales: continue
                             _seen_whales.add(trade_id)
-                            if len(_seen_whales)>2000: _seen_whales=set(list(_seen_whales)[-1000:])
+                            if len(_seen_whales)>2000:
+                                _seen_whales=set(list(_seen_whales)[-1000:])
                             side=tr.get("side","buy"); price=float(tr.get("price",0))
                             text,share_url=build_whale_tweet(s,side,notional,price)
-                            kb=InlineKeyboardMarkup([[_btn("🚀 انشر على تويتر (X)",url=share_url)],[_btn("📋 رابط التسجيل فقط",url=REFERRAL_LINKS["binance"][1])]])
-                            await app.bot.send_message(ADMIN_ID,f"🚨 <b>صيد جديد (جاهز للنشر):</b>\n\n{text}",parse_mode=ParseMode.HTML,reply_markup=kb,link_preview_options=NO_PREVIEW)
+                            kb=InlineKeyboardMarkup([
+                                [_btn("🚀 انشر على تويتر (X)",url=share_url)],
+                                [_btn("📋 رابط التسجيل فقط",url=REFERRAL_LINKS["binance"][1])]])
+                            await app.bot.send_message(ADMIN_ID,f"🚨 <b>صيد جديد (جاهز للنشر):</b>\n\n{text}",
+                                parse_mode=ParseMode.HTML,reply_markup=kb,link_preview_options=NO_PREVIEW)
                             _whale_day["count"] += 1
                 except Exception: continue
         except asyncio.CancelledError: raise
@@ -2703,7 +2892,8 @@ async def promo_loop(app):
 
 def build_weekly_report():
     since = (time.time() - 7*DAY) * 1000
-    with store.lock: h = [x for x in store.data["history"] if (x.get("closed") or 0) >= since]
+    with store.lock:
+        h = [x for x in store.data["history"] if (x.get("closed") or 0) >= since]
     if len(h) < 5: return None
     R = np.array([float(x.get("R") or 0) for x in h], dtype=float)
     wins = int((R > 0).sum()); g = R[R > 0].sum(); l = -R[R <= 0].sum()
@@ -2766,6 +2956,7 @@ def predictive_scan(symbols):
         except Exception: continue
     out.sort(key=lambda x:-x["score"])
     return out[:PREDICT_TOP_N]
+
 def simulate(df,sym,tf,start=210):
     n=len(df); o,h,l,c=(df[k].values for k in ("open","high","low","close"))
     atr,t=df["atr"].values,df["t"].values
@@ -4158,13 +4349,16 @@ async def on_text(update,ctx):
     try:
         res=await asyncio.to_thread(get_analysis,sym)
         tier="admin" if st=="admin" else ("vip" if st=="vip" else "free")
+        
         kb=keyboard(sym,res["tf"],tier,"binance_fut",lang)
         text_caption = caption_core(res, tier, lang)
         img=await asyncio.to_thread(render_chart,res,tier)
         await update.message.reply_photo(photo=img, reply_markup=kb)
         await update.message.reply_text(text_caption, parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
+        
         if tier == "admin":
             await send_admin_copy(update.message, res)
+            
         cur_pts=store.data["users"].get(uid,{}).get("points",0)
         bot_un=ctx.application.bot_data.get("username","")
         await send_points_flash(update.message,cur_pts,update.effective_user.id,bot_un)
@@ -4208,7 +4402,7 @@ async def post_init(app):
         asyncio.create_task(whale_hunter_loop(app)),
         asyncio.create_task(weekly_report_loop(app)),asyncio.create_task(trial_notice_loop(app)),
         asyncio.create_task(morning_brief_loop(app))]
-    log.info("ryma v113 | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$500000 | SL≤2.5%% | RR≥1.5 | hype=admin | neon=admin | patterns_chart=admin",
+    log.info("ryma v112 | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$500000 | SL≤2.5%% | RR≥1.5 | hype=admin | neon=admin | patterns_chart=admin",
              MAX_OPEN,CYCLE_GOLDEN,get_golden_config().get("min_score",1),is_multi_exchange(),
              VIP_THRESHOLD,VIP_REWARD_DAYS)
 
@@ -4247,5 +4441,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
-    
