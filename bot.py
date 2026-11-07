@@ -495,7 +495,7 @@ PAYMENT_INFO = _e("PAYMENT_INFO", "Binance Pay: 905142395")
 PROTECT = _e("PROTECT_CONTENT", "1") == "1"
 MAINTENANCE = _e("MAINTENANCE", "0") == "1"
 BRAND = "💎 Ryma Crypto 💎"
-BOT_VERSION = "diag-1 · 2026-11-07"
+BOT_VERSION = "diag-2 · 2026-11-07"
 WHALE_MIN_USD = 500000
 
 RISK_WARNING_AR = "⚠️ <i>التداول ينطوي على مخاطر عالية. يرجى إدارة رأس المال بذكاء. ليست نصيحة مالية.</i>"
@@ -4724,6 +4724,164 @@ async def cmd_btdiag(update,ctx):
     finally:
         _BT_BUSY[0]=False
 
+# ======================= تصدير بيانات البحث (/exportdata) =======================
+# يقرأ بيانات عامة من Binance فقط (لا توكن ولا مفاتيح) ويرسل ملفات ZIP للأدمن.
+EXP_PACE=0.35               # ثوانٍ بين الطلبات: نحمي حد الطلبات المشترك مع باقي البوت
+EXP_4H_BARS=11000           # ~5 سنوات
+EXP_1D_BARS=1900
+EXP_1H_BARS=13000           # ~1.5 سنة
+EXP_FUND_YEARS=5.0
+EXP_ZIP_MAX=44*1024*1024    # حد تيليغرام للملف 50MB
+_EXP_BUSY=[False]
+
+def _exp_get(url,params,tries=5):
+    """طلب مع إعادة محاولة. يرجع None إذا الرمز غير موجود/فشل. 418 = حظر IP فنوقف."""
+    for k in range(tries):
+        try:
+            r=requests.get(url,params=params,timeout=15)
+            if r.status_code==200: return r.json()
+            if r.status_code==418: raise RuntimeError("418: Binance حظر الـIP مؤقتاً، أعد المحاولة بعد دقائق")
+            if r.status_code==400: return None
+            if r.status_code==429: time.sleep(min(int(r.headers.get("Retry-After","5") or 5),60)); continue
+            time.sleep(1+k)
+        except RuntimeError: raise
+        except Exception: time.sleep(1+k)
+    return None
+
+def _exp_klines(sym,interval,bars,tf_ms):
+    """يرجع (rows, complete). rows: قوائم كلاينز Binance الخام، بدون الشمعة غير المغلقة."""
+    out,end,complete=[],None,True
+    while len(out)<bars:
+        p={"symbol":f"{sym}USDT","interval":interval,"limit":1000}
+        if end: p["endTime"]=end
+        data=_exp_get(f"{BINANCE_FAPI_BASE}/fapi/v1/klines",p); time.sleep(EXP_PACE)
+        if data is None: complete=False; break          # فشل الطلب: بيانات ناقصة
+        if not isinstance(data,list) or not data: break # [] = بداية التاريخ
+        out=data+out; end=int(data[0][0])-1
+        if len(data)<1000: break
+    now=int(time.time()*1000)
+    by_t={int(k[0]):k for k in out}
+    rows=[by_t[t] for t in sorted(by_t) if t+tf_ms<=now]
+    return rows[-bars:],complete
+
+def _exp_funding(sym,years):
+    cur=int((time.time()-years*365*86400)*1000); out=[]
+    while True:
+        data=_exp_get(f"{BINANCE_FAPI_BASE}/fapi/v1/fundingRate",{"symbol":f"{sym}USDT","startTime":cur,"limit":1000})
+        time.sleep(EXP_PACE)
+        if not isinstance(data,list) or not data: break
+        out+=data; last=int(data[-1]["fundingTime"])
+        if len(data)<1000 or last<cur: break
+        cur=last+1
+    return out
+
+def exp_collect(syms,tmp,lite,progress=None):
+    import csv
+    meta=dict(version=BOT_VERSION,created_utc=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+              lite=bool(lite),symbols={},failed=[])
+    sets=[("4h","4h",14_400_000,EXP_4H_BARS if not lite else 6900),("1d","1d",86_400_000,EXP_1D_BARS)]
+    if not lite: sets.append(("1h","1h",3_600_000,EXP_1H_BARS))
+    for d_ in ("4h","1d","1h","funding"): os.makedirs(os.path.join(tmp,d_),exist_ok=True)
+    for i,sy in enumerate(syms,1):
+        if progress and (i==1 or i%3==0): progress(i,len(syms),sy)
+        info={}
+        try:
+            for name,interval,tfms,bars in sets:
+                rows,ok=_exp_klines(sy,interval,bars,tfms)
+                if len(rows)<50: raise ValueError(f"{name}: بيانات قليلة")
+                with open(os.path.join(tmp,name,f"{sy}.csv"),"w",newline="") as f:
+                    w=csv.writer(f); w.writerow(["t","open","high","low","close","volume","quote_volume","trades","taker_buy_base","taker_buy_quote"])
+                    for k in rows: w.writerow([k[0],k[1],k[2],k[3],k[4],k[5],k[7],k[8],k[9],k[10]])
+                info[name]=dict(bars=len(rows),first=int(rows[0][0]),last=int(rows[-1][0]),complete=bool(ok))
+            fr=_exp_funding(sy,EXP_FUND_YEARS)
+            with open(os.path.join(tmp,"funding",f"{sy}.csv"),"w",newline="") as f:
+                w=csv.writer(f); w.writerow(["fundingTime","fundingRate","markPrice"])
+                for r in fr: w.writerow([r.get("fundingTime"),r.get("fundingRate"),r.get("markPrice","")])
+            info["funding"]=dict(rows=len(fr))
+            meta["symbols"][sy]=info
+        except RuntimeError: raise
+        except Exception as e:
+            meta["failed"].append(dict(symbol=sy,error=str(e)[:120]))
+    return meta
+
+EXP_README="""Ryma research data (public Binance USDT-M futures data only)
+- t / fundingTime: milliseconds since epoch, UTC. Candle t = OPEN time.
+- Only CLOSED candles are included (the forming candle is dropped).
+- klines columns: t,open,high,low,close,volume,quote_volume,trades,taker_buy_base,taker_buy_quote
+- funding columns: fundingTime,fundingRate,markPrice (every 8h)
+- Symbols = top by current 24h volume (survivorship bias: coins that died are missing; new coins have short history).
+- meta.json lists bars per symbol, and `complete=false` if a download was cut short.
+"""
+
+def exp_zip(tmp,meta):
+    import zipfile
+    meta_path=os.path.join(tmp,"meta.json")
+    with open(meta_path,"w",encoding="utf-8") as f: json.dump(meta,f,ensure_ascii=False,indent=1)
+    readme=os.path.join(tmp,"README.txt")
+    with open(readme,"w",encoding="utf-8") as f: f.write(EXP_README)
+    groups=[("ryma_4h",["4h"]),("ryma_1d_funding",["1d","funding"]),("ryma_1h",["1h"])]
+    outs=[]
+    for base,dirs in groups:
+        files=[]
+        for d_ in dirs:
+            p=os.path.join(tmp,d_)
+            if os.path.isdir(p): files+=[(os.path.join(p,x),f"{d_}/{x}") for x in sorted(os.listdir(p))]
+        if not files: continue
+        parts=[]
+        def open_part(n):
+            path=os.path.join(tmp,f"{base}_p{n}.zip")
+            z=zipfile.ZipFile(path,"w",zipfile.ZIP_DEFLATED,compresslevel=6)
+            z.write(meta_path,"meta.json"); z.write(readme,"README.txt"); parts.append(path); return z,path
+        n=1; zf,path=open_part(n)
+        for full,arc in files:
+            zf.fp.flush()
+            if os.path.getsize(path)>=EXP_ZIP_MAX:      # الجزء امتلأ: نبدأ جزءاً جديداً قبل الملف التالي
+                zf.close(); n+=1; zf,path=open_part(n)
+            zf.write(full,arc)
+        zf.close()
+        if len(parts)==1:
+            final=os.path.join(tmp,f"{base}.zip"); os.replace(parts[0],final); outs.append(final)
+        else: outs+=parts
+    return outs
+
+async def _safe_edit(msg,text):
+    try: await msg.edit_text(text)
+    except Exception as _ex: log.debug('ignored: %s',_ex)
+
+@admin_only
+async def cmd_exportdata(update,ctx):
+    """/exportdata [lite] — يصدّر بيانات 50 عملة (4س/يومي/ساعة/تمويل) كملفات ZIP لغرض البحث."""
+    if _EXP_BUSY[0]:
+        await update.message.reply_text("⏳ تصدير آخر قيد التشغيل"); return
+    import shutil, tempfile
+    lite=any(a.lower()=="lite" for a in ctx.args)
+    _EXP_BUSY[0]=True; tmp=None
+    try:
+        msg=await update.message.reply_text(
+            "⏳ بدأ التصدير (%s). يأخذ حوالي %s، ويرسل الملفات في الآخر. لا تعيد الأمر."%(
+                BOT_VERSION,"4–6 دقائق" if lite else "10–15 دقيقة"))
+        syms=await asyncio.to_thread(top_symbols,50)
+        syms=["BTC"]+[x for x in syms if x!="BTC"]; syms=syms[:50]
+        tmp=tempfile.mkdtemp(prefix="ryma_exp_")
+        loop=asyncio.get_running_loop()
+        def progress(i,n,sy): asyncio.run_coroutine_threadsafe(_safe_edit(msg,f"⏳ {i}/{n} · {sy}"),loop)
+        meta=await asyncio.to_thread(exp_collect,syms,tmp,lite,progress)
+        if not meta["symbols"]:
+            await msg.edit_text("❌ ما اتجمعت بيانات. الأخطاء: "+"; ".join(f"{x['symbol']}:{x['error']}" for x in meta["failed"][:5])); return
+        files=await asyncio.to_thread(exp_zip,tmp,meta)
+        await msg.edit_text(f"✅ تم الجمع: {len(meta['symbols'])} عملة، فشل {len(meta['failed'])}. جارٍ إرسال {len(files)} ملف...")
+        for path in files:
+            mb=os.path.getsize(path)/1048576
+            with open(path,"rb") as fh:
+                await ctx.bot.send_document(update.effective_chat.id,document=fh,filename=os.path.basename(path),
+                    caption=f"{os.path.basename(path)} · {mb:.1f}MB · {BOT_VERSION}",protect_content=False,
+                    read_timeout=600,write_timeout=600,connect_timeout=60)
+        if meta["failed"]:
+            await update.message.reply_text("⚠️ فشل: "+", ".join(f"{x['symbol']}" for x in meta["failed"])[:3500])
+    finally:
+        _EXP_BUSY[0]=False
+        if tmp: shutil.rmtree(tmp,ignore_errors=True)
+
 @admin_only
 async def cmd_bt50(update,ctx):
     try: years=float(ctx.args[0]) if ctx.args else 3.0
@@ -5502,7 +5660,7 @@ def main():
         ("portfolio",cmd_portfolio),("alpha_v2",cmd_alpha_radar_v2),
         ("patterns",cmd_patterns),("neon",cmd_neon),
         ("points",cmd_points),("myref",cmd_myref),("addpoints",cmd_addpoints),
-        ("btdiag",cmd_btdiag),("fear",cmd_fear),("market",cmd_market),("top",cmd_top),("tools",cmd_tools),("risk",cmd_riskcalc)]
+        ("btdiag",cmd_btdiag),("exportdata",cmd_exportdata),("fear",cmd_fear),("market",cmd_market),("top",cmd_top),("tools",cmd_tools),("risk",cmd_riskcalc)]
     for name,fn in handlers: app.add_handler(CommandHandler(name,fn))
     app.add_handler(TypeHandler(Update,log_updates),group=-1)
     app.add_handler(CommandHandler("botinfo",cmd_botinfo))
