@@ -27,7 +27,7 @@ ENG_CFG = dict(
     swing_lb=40,
     be_offset_r=0.05,     # نقطة التعادل = الدخول + 0.05R (تغطي الرسوم)
     trail_atr=3.0,
-    max_hold=60,
+    max_hold=6,          # يوم تداول: ~24 ساعة على فريم 4س
 )
 
 
@@ -495,7 +495,8 @@ PAYMENT_INFO = _e("PAYMENT_INFO", "Binance Pay: 905142395")
 PROTECT = _e("PROTECT_CONTENT", "1") == "1"
 MAINTENANCE = _e("MAINTENANCE", "0") == "1"
 BRAND = "💎 Ryma Crypto 💎"
-BOT_VERSION = "shadow-1 · 2026-11-08"
+BOT_VERSION = "daytrader-2 · 2026-11-08"
+SHADOW_MODE = os.getenv("SHADOW_MODE","0").strip() != "0"   # 0=نشر عادي للقنوات | 1=ظل (تتبع داخلي فقط)
 CYCLE_RADAR = 300
 WHALE_MIN_USD = 500000
 
@@ -589,18 +590,18 @@ VIP_POSTS_PER_CYCLE = 5; FREE_POSTS_PER_CYCLE = 10; FREE_MAX_PER_DAY = 40
 CYCLE_AUTOPOST=12600; CYCLE_SHORT_FREE=14400; CYCLE_MARKET_SUMMARY=16200
 CYCLE_PREDICT=14400; CYCLE_ALPHA_SUMMARY=14400; CYCLE_BOTTOMS_AUTO=21600
 CYCLE_GOLDEN=18000; CYCLE_PROMO=604800; CROSS_CHECK_INTERVAL=3600
-SMART_PROFIT_DAYS=7; SMART_MAX_AGE_DAYS=14; SMART_FORCE_DAYS=3
+SMART_PROFIT_DAYS=1; SMART_MAX_AGE_DAYS=2; SMART_FORCE_DAYS=1
 SMART_FILL_TRIGGER=0.8; CLEANUP_EVERY_CYCLES=12
 PIVOT_WINDOW=100; PIVOT_LOOKBACK=3; MIN_PIVOT_DIST=0.5
 CORE_SL_MAX=2.5; CORE_SL_MIN=1.5
 MAX_TP_ATR = 6.0; MIN_RR_TP1 = 1.5
 CORE_TP_FRACS=[0.50,0.25,0.15,0.10]
-BE_OFFSET_R=0.05; TRAIL_ATR=3.0; MAX_HOLD=60
+BE_OFFSET_R=0.05; TRAIL_ATR=2.0; MAX_HOLD=6   # يوم تداول ~24س على 4h
 CORE_VOL_MULT=0.7; CORE_RSI_LONG=(35,70); CORE_RSI_SHORT=(50,80); EXT_MAX_ATR=3.5
 MIN_DAILY_VOLUME_USD=5_000_000; VIP_MIN_LIQUIDITY=3_000_000; REQUIRE_MTF_FOR_SMALL=True
 MEME_TP_PCTS=[3.0,6.0,10.0,15.0]; MEME_TP_FRACS=[0.50,0.25,0.15,0.10]
 MEME_SL_PCT=6.5; MEME_VOL_MULT=1.5; MEME_RSI_LOW=25; MEME_RSI_HIGH=75
-MEME_BREAKOUT_BARS=5; MEME_TRAIL_ATR=2.0; MEME_TIME_STOP=15; MEME_MAX_HOLD=50
+MEME_BREAKOUT_BARS=5; MEME_TRAIL_ATR=2.0; MEME_TIME_STOP=12; MEME_MAX_HOLD=16
 RISK_SIZE={"A+":0.10,"A":0.08,"B":0.05,"C":0.02}
 PREDICT_BB_SQZ=0.75; PREDICT_VOL_BUILDUP=1.4; PREDICT_RSI_NEUTRAL=(42,58)
 PREDICT_OI_CHANGE_MIN=3.0; PREDICT_FUNDING_EXTREME=0.05; PREDICT_TOP_N=10; PREDICT_TF="4h"
@@ -620,9 +621,9 @@ for _n in ("httpx","httpcore","telegram.ext.Updater"): logging.getLogger(_n).set
 START_TS = time.time(); DAY = 86400
 def now_s(): return int(time.time())
 
-DEFAULT_GOLDEN_CONFIG = {"require_1d_trend":False,"require_mtf":False,"require_rsi":True,
+DEFAULT_GOLDEN_CONFIG = {"require_1d_trend":False,"require_mtf":False,"require_rsi":False,
     "require_volume":False,"require_breakout":False,"require_liquidity":False,
-    "require_alpha":False,"min_score":1}
+    "require_alpha":False,"min_score":0}
 
 KEYS = ["users","vip","signals","history","posted","settings","portfolios"]
 DEFAULTS = {"users":{},"vip":{},"signals":[],"history":[],"posted":{},"portfolios":{},
@@ -2167,7 +2168,11 @@ def trade_step(p,o,h,l,c,atr):
     if sum(t["hit"] for t in p["tps"])>=2:
         p["trail_on"]=True
         if atr and atr>0: p["sl"]=_tighten(s,p["sl"],p["ext"]-s*TRAIL_ATR*atr)
-    if p["bars"]>=MAX_HOLD: return close_at(p,c,"TIME",ev)
+    # حد زمني ليوم التداول (~24 ساعة) بغض النظر عن الفريم
+    age_ms = int(time.time()*1000) - int(p.get("opened") or p.get("created") or 0)
+    tf_hold = {"15m": 96, "1h": 24, "4h": 6, "1d": 1}.get(p.get("tf"), MAX_HOLD)
+    if p["bars"] >= tf_hold or age_ms >= 24 * 3600 * 1000:
+        return close_at(p, c, "TIME", ev)
     return ev
 
 def fmt(x):
@@ -2487,7 +2492,7 @@ def keyboard_share_post(res):
     return InlineKeyboardMarkup(trade_rows+[[_btn("❌ إغلاق",callback_data="close_menu")]])
 
 async def notify_both(bot,text,protect=True):
-    for chat in (VIP_CHANNEL_ID,ADMIN_ID or None):
+    for chat in ((ADMIN_ID or None,) if SHADOW_MODE else (VIP_CHANNEL_ID,ADMIN_ID or None)):
         if not chat: continue
         try:
             await bot.send_message(chat,text,parse_mode=ParseMode.HTML,
@@ -3176,6 +3181,7 @@ def keyboard_vip_menu():
     return InlineKeyboardMarkup([
         [_btn("💎✨ الفرصة الذهبية",callback_data="vip_cmd:/golden")],
         [_btn("🎯 صفقة اليوم",callback_data="vip_cmd:/daily")],
+        [_btn("⚡ رادار الفرص المبكرة",callback_data="vip_cmd:/radar")],
         [_btn("🚀 رادار النخبة (Alpha/Web3)",callback_data="vip_cmd:/alpha_v2")],
         [_btn("🔮 التنبؤ بالانفجارات",callback_data="vip_cmd:/predict")],
         [_btn("🐋 رادار الصفقات الكبيرة",callback_data="vip_cmd:/whales")],
@@ -3225,6 +3231,7 @@ def keyboard_admin_menu():
         [_btn("🖼️ شارت النماذج (يدوي)",callback_data="patterns_chart_manual")],
         [_btn("📤 مشاركة صفقة اجتماعياً",callback_data="adm_args:share")],
         [_btn("💎✨ الفرصة الذهبية",callback_data="adm:/golden"),_btn("🎯 صفقة اليوم",callback_data="adm:/daily")],
+        [_btn("⚡ رادار الفرص المبكرة",callback_data="adm:/radar")],
         [_btn("🌟 التقاطعات",callback_data="adm:/cross"),_btn("🔍 تشخيص",callback_data="adm:/debug")],
         [_btn("📊 فحص السوق",callback_data="adm:/scan"),_btn("🔻 فرص شورت",callback_data="adm:/short")],
         [_btn("🔮 التنبؤ",callback_data="adm:/predict"),_btn("🐋 الحيتان",callback_data="adm:/whales")],
@@ -3280,6 +3287,8 @@ def track_signal(res):
     return p
 
 async def publish(bot,res,vip=True,free=False,admin_copy=False):
+    if SHADOW_MODE:
+        log.info("shadow: نشر محجوب لـ %s", res.get("sym")); return []
     if res.get("wait"): return []
     sent=[]; copy_text=build_copy_post(res); source=res.get("source","binance_fut")
     try:
@@ -5279,7 +5288,7 @@ async def cb_handler(update,ctx):
             handlers={"/predict":cmd_predict,"/whales":cmd_whales,"/explosions":cmd_explosions,
                 "/pump":cmd_pump,"/bottom":cmd_bottoms,"/shortsradar":cmd_shorts_radar,
                 "/alpha":cmd_alpha,"/active":cmd_active,"/golden":cmd_golden,"/daily":cmd_daily,
-                "/alpha_v2":cmd_alpha_radar_v2}
+                "/alpha_v2":cmd_alpha_radar_v2,"/radar":cmd_radar}
             fn=handlers.get(cmd)
             if fn: await fn(fake,ctx)
         except Exception as e:
@@ -5611,9 +5620,11 @@ def get_crypto_news(symbol):
 _radar_seen = {}
 
 def radar_scan(symbols):
-    """يرصد عملات بدأت تتحرك بقوة وحجم استثنائي قبل أن تظهر في قائمة الترند (تقريباً: تغير 24 ساعة أقل من 10%).
-    الشروط: صعود ≥5% خلال شمعتين (15 دقيقة × 2)، حجم الشمعة ≥3× متوسط آخر 20، وإغلاق فوق أعلى 20 شمعة سابقة.
-    يرجع قائمة إشارات بنفس بنية analyze() لتسجيلها في نظام التتبع."""
+    """رادار الفرص المبكرة (فريم 15د — فيوتشر).
+    يلتقط تحركاً قوياً + حجم استثنائي قبل أن ينفجر الـ24س.
+    شروط LONG: صعود ≥4% خلال شمعتين، حجم ≥2.5×، إغلاق فوق أعلى 20، تغير 24س <12%.
+    شروط SHORT: هبوط ≥4% خلال شمعتين، حجم ≥2.5×، إغلاق تحت أدنى 20، تغير 24س >-12%.
+    مدة الصفقة قصيرة (يوم تداول)."""
     out = []
     for s in symbols:
         try:
@@ -5621,26 +5632,36 @@ def radar_scan(symbols):
             d = add_indicators(df, 100)
             if len(d) < 25: continue
             last = len(d) - 1
-            c = d["close"]; v = d["volume"]; h = d["high"]
+            c = d["close"]; v = d["volume"]; h = d["high"]; l = d["low"]
             move = float(c.iloc[last] / c.iloc[last - 2] - 1)
-            if move < 0.05: continue
             base_v = float(v.iloc[last - 20:last].mean())
             if base_v <= 0: continue
             vol_ratio = float(v.iloc[last]) / base_v
-            if vol_ratio < 3: continue
-            if float(c.iloc[last]) < float(h.iloc[last - 20:last].max()): continue
+            if vol_ratio < 2.5: continue
             _p, ch24, _c7 = ticker_change(s)
-            if ch24 is None or ch24 >= 10: continue
+            if ch24 is None: continue
             atr = float(d["atr"].iloc[last])
             price = float(c.iloc[last])
             if not (atr > 0 and price > 0): continue
-            risk = 2.5 * atr
-            tp_px = price + 0.6 * risk
-            lv = dict(entry=price, sl=price - risk, risk=risk, atr=atr,
-                      tps=[dict(px=tp_px, pct=round(100 * 0.6 * risk / price, 2), frac=1.0, hit=False, src="radar")])
-            out.append(dict(sym=s, tf="15m", side=1, lv=lv, bar_t=int(d["t"].iloc[last]),
-                            grade="R", setup="RADAR", source="binance_fut",
-                            move=round(move * 100, 2), vol_ratio=round(vol_ratio, 1), ch24=round(ch24, 2), price=price))
+            side = 0
+            if move >= 0.04 and float(c.iloc[last]) >= float(h.iloc[last - 20:last].max()) and ch24 < 12:
+                side = 1
+            elif move <= -0.04 and float(c.iloc[last]) <= float(l.iloc[last - 20:last].min()) and ch24 > -12:
+                side = -1
+            if side == 0: continue
+            risk = max(1.5 * atr, price * 0.008)
+            risk = min(risk, 2.8 * atr)
+            sl = price - side * risk
+            tps = []
+            for mult, frac in ((1.2, 0.50), (2.0, 0.30), (3.0, 0.20)):
+                px = price + side * risk * mult
+                tps.append(dict(px=float(px), pct=round(100 * side * (px - price) / price, 2),
+                                frac=frac, hit=False, src="radar"))
+            lv = dict(entry=price, sl=float(sl), risk=float(risk), atr=atr, tps=tps)
+            out.append(dict(sym=s, tf="15m", side=side, lv=lv, bar_t=int(d["t"].iloc[last]),
+                            grade="R", setup="RADAR", source="binance_fut", rank=1, ok=1,
+                            move=round(move * 100, 2), vol_ratio=round(vol_ratio, 1),
+                            ch24=round(ch24, 2), price=price, forced=False, wait=False))
         except Exception:
             continue
     return out
@@ -5662,15 +5683,68 @@ async def shadow_loop(app):
                     continue
                 await asyncio.to_thread(track_signal, hit)
                 new.append(hit)
-            if new and ADMIN_ID:
-                lines = [f"🧪 رادار (وضع الظل): {len(new)} رصد جديد"]
+            if new:
+                lines = [f"⚡ <b>رادار الفرص المبكرة</b> · {len(new)} رصد", "━━━━━━━━━━━━━━━━"]
                 for h in new:
-                    lines.append(f"• {h['sym']} | سعر {fmt(h['price'])} | صعود {h['move']}% | حجم ×{h['vol_ratio']} | 24س {h['ch24']}%")
-                try: await app.bot.send_message(ADMIN_ID, "\n".join(lines))
-                except Exception as _ex: log.debug('ignored: %s', _ex)
+                    side_e = "🟢 LONG" if h["side"] == 1 else "🔴 SHORT"
+                    lines.append(
+                        f"{side_e} <b>#{h['sym']}</b> | {fmt(h['price'])}\n"
+                        f"   تحرك {h['move']:+.1f}% | حجم ×{h['vol_ratio']} | 24س {h['ch24']:+.1f}%"
+                    )
+                lines += ["", RISK_WARNING_AR, f"👤 {BRAND}"]
+                txt = "\n".join(lines)
+                for chat in (VIP_CHANNEL_ID, ADMIN_ID or None):
+                    if not chat: continue
+                    try:
+                        await app.bot.send_message(chat, txt, parse_mode=ParseMode.HTML,
+                                                   protect_content=(PROTECT if chat != ADMIN_ID else False),
+                                                   link_preview_options=NO_PREVIEW)
+                    except Exception as _ex:
+                        log.debug("radar notify %s: %s", chat, _ex)
         except asyncio.CancelledError: raise
         except Exception: log.exception("shadow_loop")
         await asyncio.sleep(CYCLE_RADAR)
+
+
+@vip_only
+async def cmd_radar(update, ctx):
+    """مسح يدوي لرادار الفرص المبكرة + تنبيه VIP والأدمن."""
+    wait = await update.message.reply_text("⚡ <b>رادار الفرص المبكرة</b>\n⏳ مسح السوق (15د)...", parse_mode=ParseMode.HTML)
+    try:
+        syms = await asyncio.to_thread(top_symbols, 80)
+        hits = await asyncio.to_thread(radar_scan, syms)
+        if not hits:
+            await wait.edit_text("⚡ لا توجد فرص مبكرة حالياً (السوق هادئ)."); return
+        lines = [f"⚡ <b>رادار الفرص المبكرة</b> · {len(hits)} فرصة", "━━━━━━━━━━━━━━━━", ""]
+        for h in hits[:12]:
+            side_e = "🟢 LONG" if h["side"] == 1 else "🔴 SHORT"
+            cl = coin_link(h["sym"], "binance_fut")
+            lines.append(f"{side_e} <a href='{cl}'>#{h['sym']}</a> · {fmt(h['price'])}")
+            lines.append(f"   تحرك {h['move']:+.1f}% | حجم ×{h['vol_ratio']} | 24س {h['ch24']:+.1f}%")
+            lv = h["lv"]
+            lines.append(f"   ➡️ {fmt(lv['entry'])} | 🛑 {fmt(lv['sl'])} | 🎯 {fmt(lv['tps'][0]['px'])}")
+            lines.append("")
+            key = f"{h['sym']}:{h['bar_t']}"
+            if key not in _radar_seen:
+                _radar_seen[key] = time.time()
+                if not any(p.get("coin") == h["sym"] and p.get("state") in ("pending", "open") for p in active_signals()):
+                    try: await asyncio.to_thread(track_signal, h)
+                    except Exception: pass
+        lines += [RISK_WARNING_AR, f"👤 {BRAND}"]
+        txt = "\n".join(lines)[:4000]
+        await wait.edit_text(txt, parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
+        for chat in (VIP_CHANNEL_ID, ADMIN_ID or None):
+            if not chat: continue
+            if update.effective_chat and chat == update.effective_chat.id: continue
+            try:
+                await ctx.bot.send_message(chat, txt, parse_mode=ParseMode.HTML,
+                                           protect_content=(PROTECT if chat != ADMIN_ID else False),
+                                           link_preview_options=NO_PREVIEW)
+            except Exception as _ex: log.debug("cmd_radar notify: %s", _ex)
+    except Exception as e:
+        log.exception("cmd_radar")
+        try: await wait.edit_text(f"⚠️ {str(e)[:150]}")
+        except Exception: pass
 
 async def cmd_shadow(update, ctx):
     if not update.effective_user or update.effective_user.id != ADMIN_ID: return
@@ -5698,8 +5772,11 @@ async def post_init(app):
         n=await asyncio.to_thread(smart_cleanup_trades)
         log.info(f"startup: smart_cleanup نظّفت {n} صفقة")
     except Exception as e: log.warning(f"startup cleanup: {e}")
-    
-    app.bot_data["tasks"]=[
+    if SHADOW_MODE:
+        app.bot_data["tasks"]=[asyncio.create_task(tracker_loop(app)),asyncio.create_task(shadow_loop(app)),asyncio.create_task(golden_loop(app))]
+        log.info("وضع الظل مفعّل (SHADOW_MODE=1): لا نشر للقنوات")
+    else:
+      app.bot_data["tasks"]=[
         asyncio.create_task(autopost_loop(app)),asyncio.create_task(tracker_loop(app)),
         asyncio.create_task(predict_loop(app)),asyncio.create_task(market_summary_loop(app)),
         asyncio.create_task(short_free_loop(app)),asyncio.create_task(alpha_summary_loop(app)),
@@ -5707,8 +5784,8 @@ async def post_init(app):
         asyncio.create_task(golden_loop(app)),asyncio.create_task(promo_loop(app)),
         asyncio.create_task(whale_hunter_loop(app)),
         asyncio.create_task(weekly_report_loop(app)),asyncio.create_task(trial_notice_loop(app)),
-        asyncio.create_task(morning_brief_loop(app))]
-        
+        asyncio.create_task(morning_brief_loop(app)),
+        asyncio.create_task(shadow_loop(app))]
     log.info("version %s",BOT_VERSION)
     log.info("ryma FINAL (engine+always-trade) | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$500000 | SL≤2.5%% | RR≥1.5 | hype=admin | neon=admin | patterns_chart=admin",
              MAX_OPEN,CYCLE_GOLDEN,get_golden_config().get("min_score",1),is_multi_exchange(),
@@ -5740,7 +5817,7 @@ def main():
         ("golden",cmd_golden),("goldenconfig",cmd_goldenconfig),("share",cmd_share),
         ("portfolio",cmd_portfolio),("alpha_v2",cmd_alpha_radar_v2),
         ("patterns",cmd_patterns),("neon",cmd_neon),
-        ("points",cmd_points),("myref",cmd_myref),("addpoints",cmd_addpoints),
+        ("points",cmd_points),("myref",cmd_myref),("addpoints",cmd_addpoints),("radar",cmd_radar),
         ("btdiag",cmd_btdiag),("exportdata",cmd_exportdata),("fear",cmd_fear),("market",cmd_market),("top",cmd_top),("tools",cmd_tools),("risk",cmd_riskcalc)]
     for name,fn in handlers: app.add_handler(CommandHandler(name,fn))
     app.add_handler(TypeHandler(Update,log_updates),group=-1)
