@@ -9,11 +9,11 @@ import types as _types
 ENG_TP_FRACS = [0.50, 0.25, 0.15, 0.10]
 
 ENG_CFG = dict(
-    min_score=6.5,        # أقل نتيجة لقبول الصفقة (B)
+    min_score=5.5,        # أقل نتيجة لقبول الصفقة (B) — مخفّف ليوم التداول
     grade_a=8.0,
     grade_aplus=10.0,
     min_adx=18.0,         # أقل من هذا = سوق عرضي
-    max_ext_atr=2.2,      # أقصى بعد عن EMA20 عند الدخول (لا مطاردة)
+    max_ext_atr=2.8,      # أقصى بعد عن EMA20 عند الدخول (لا مطاردة)
     rsi_long_max=72.0,
     rsi_short_min=28.0,
     min_sl_atr=1.0,
@@ -199,14 +199,41 @@ def eng_build_levels(df, i, side, price, atr, htf=None, htf_i=None, cfg=ENG_CFG)
         base = targets[-1] if targets else price + side * cfg["min_rr_tp1"] * risk
         targets.append(base + side * step)
         srcs.append("R")
+    # سقف المخاطرة كنسبة من السعر (مهم للعملات الرخيصة مثل UAI)
+    max_risk_pct = 0.12  # 12%
+    if risk > price * max_risk_pct:
+        risk = price * max_risk_pct
+        sl = price - side * risk
     fixed, last = [], price
-    for px in targets:                          # ترتيب تصاعدي صارم بمسافة دنيا
+    for px in targets:
         if abs(px - price) < abs(last - price) + 0.35 * atr:
             px = price + side * (abs(last - price) + 0.35 * atr)
+        # لا أهداف ≤ 0 أبداً (شورت على عملات رخيصة)
+        if side == -1:
+            px = max(px, price * 0.05)
+        else:
+            px = max(px, price * 1.001)
         fixed.append(px)
         last = px
+    # إعادة بناء أهداف R إذا بقيت أقل من 4 بعد القص
+    while len(fixed) < 4:
+        base = fixed[-1] if fixed else price + side * max(cfg["min_rr_tp1"] * risk, 0.01 * price)
+        nxt = base + side * max(0.5 * risk, 0.35 * atr)
+        if side == -1:
+            nxt = max(nxt, price * 0.05)
+        fixed.append(nxt)
+        srcs.append("R")
+    fixed = fixed[:4]
+    srcs = (srcs + ["R"] * 4)[:4]
     tps = [dict(px=float(px), pct=round(100 * side * (px - price) / price, 2),
                 frac=ENG_TP_FRACS[k], hit=False, src=srcs[k]) for k, px in enumerate(fixed)]
+    if side == -1:
+        sl = min(sl, price * 1.12)  # سقف وقف الشورت
+    else:
+        sl = max(sl, price * 0.88)
+    risk = abs(price - sl)
+    if risk <= 0:
+        return None, "مخاطرة غير صالحة"
     lv = dict(entry=float(price), sl=float(sl), risk=float(risk), tps=tps, atr=float(atr))
     return lv, ""
 
@@ -799,7 +826,18 @@ def get_golden_config():
         cfg=store.data.setdefault("settings",{}).get("golden_config")
         if not cfg or not isinstance(cfg,dict):
             cfg=dict(DEFAULT_GOLDEN_CONFIG); store.data["settings"]["golden_config"]=cfg; store.save("settings")
-        merged=dict(DEFAULT_GOLDEN_CONFIG); merged.update(cfg); return merged
+        merged=dict(DEFAULT_GOLDEN_CONFIG); merged.update(cfg)
+        # فرض التخفيف: لا نترك قيم قديمة من Gist تشدّ الشروط
+        merged["require_rsi"] = False
+        merged["require_1d_trend"] = False
+        merged["require_mtf"] = False
+        merged["require_volume"] = False
+        merged["require_breakout"] = False
+        merged["require_liquidity"] = False
+        merged["require_alpha"] = False
+        if merged.get("min_score", 0) > 1:
+            merged["min_score"] = 0
+        return merged
 def set_golden_config(key,value):
     with store.lock:
         cfg=store.data.setdefault("settings",{}).setdefault("golden_config",dict(DEFAULT_GOLDEN_CONFIG))
@@ -1693,11 +1731,17 @@ def compute_core_levels(df, i, side, price=None):
             for k in range(1, 4):
                 if targets[k] >= targets[k-1]:
                     targets[k] = targets[k-1] - atr * 0.5
+            # لا أسعار سالبة في الشورت
+            targets = [max(float(x), entry * 0.05) for x in targets]
 
+        # سقف المخاطرة 12%
+        if risk > entry * 0.12:
+            risk = entry * 0.12
+            sl = entry - side * risk
         tps = []
         for idx, px in enumerate(targets):
             pct = 100 * side * (px - entry) / entry
-            frac = CORE_TP_FRACS[idx] if idx < len(CORE_TP_FRACS) else 0
+            frac = CORE_TP_FRACS[idx] if idx < len(CORE_TP_FRACS) else  0
             tps.append(dict(px=float(px), pct=round(pct,2), frac=frac, hit=False, src=""))
             
         return dict(entry=entry, sl=sl, risk=risk, tps=tps, atr=atr)
@@ -2016,11 +2060,17 @@ def btc_trend_cached():
 
 def _hypo_levels(price,side,atr):
     """مستويات افتراضية للعرض فقط عند حالة الانتظار (لا تُنشر ولا تُتتبع)."""
-    risk=1.5*atr; tps=[]
-    for k,m in enumerate((1.5,2.5,3.5,5.0)):
-        px=price+side*risk*m
-        tps.append(dict(px=float(px),pct=round(100*side*(px-price)/price,2),frac=CORE_TP_FRACS[k],hit=False,src="R"))
-    return dict(entry=float(price),sl=float(price-side*risk),risk=float(risk),tps=tps,atr=float(atr))
+    risk = min(1.5 * atr, price * 0.08)
+    risk = max(risk, price * 0.012)
+    sl = price - side * risk
+    tps = []
+    for k, m in enumerate((1.2, 2.0, 3.0, 4.0)):
+        px = price + side * risk * m
+        if side == -1:
+            px = max(px, price * 0.05)
+        tps.append(dict(px=float(px), pct=round(100 * side * (px - price) / price, 2),
+                        frac=CORE_TP_FRACS[k], hit=False, src="R"))
+    return dict(entry=float(price), sl=float(sl), risk=float(risk), tps=tps, atr=float(atr))
 
 _analysis_cache={}
 def analyze(sym):
@@ -2277,29 +2327,84 @@ def event_text(coin,tf,side,e,R,tier="free",trade=None):
     return None
 
 def _build_daily_lists(force_side=None):
-    gainers,losers=get_top_movers(force=True)
-    all_movers=gainers+losers
-    top_syms=[x["symbol"] for x in all_movers[:40]]
-    if len(top_syms)<20: top_syms.extend(top_symbols(20))
-    results=scan_sync(list(set(top_syms)))
-    longs,shorts=[],[]
-    for r in results:
-        if r["grade"] not in ("A+","A","B"): continue
-        if r["sym"] in EXCLUDE_TICKERS: continue
-        mv=next((x for x in all_movers if x["symbol"]==r["sym"]),{"change":0,"volume":0})
-        item=dict(res=r,change=mv["change"],volume=mv["volume"])
-        if r["side"]==1 and len(longs)<2: longs.append(item)
-        elif r["side"]==-1 and len(shorts)<2: shorts.append(item)
-    if len(longs)<2 or len(shorts)<2:
-        more_syms=top_symbols(60); more_res=scan_sync(more_syms)
-        for r in more_res:
-            if r["grade"] not in ("A+","A","B"): continue
-            if r["sym"] in EXCLUDE_TICKERS: continue
-            if any(x["res"]["sym"]==r["sym"] for x in longs+shorts): continue
-            item=dict(res=r,change=0,volume=0)
-            if r["side"]==1 and len(longs)<2: longs.append(item)
-            elif r["side"]==-1 and len(shorts)<2: shorts.append(item)
-    return longs[:2],shorts[:2]
+    """يبني دائماً حتى 2 LONG و 2 SHORT قدر الإمكان (A+/A/B أولاً ثم C كاحتياطي)."""
+    gainers, losers = get_top_movers(force=True)
+    all_movers = gainers + losers
+    top_syms = [x["symbol"] for x in all_movers[:40]]
+    if len(top_syms) < 20:
+        top_syms.extend(top_symbols(30))
+    # أضف أقوى الرابحين/الخاسرين صراحةً لضمان توازن الاتجاه
+    top_syms = list(dict.fromkeys(
+        [x["symbol"] for x in gainers[:15]] +
+        [x["symbol"] for x in losers[:15]] +
+        top_syms + top_symbols(40)
+    ))
+    results = scan_sync(top_syms[:50])
+    longs, shorts = [], []
+
+    def _add(pool, r, mv):
+        if any(x["res"]["sym"] == r["sym"] for x in pool):
+            return
+        pool.append(dict(res=r, change=mv.get("change", 0), volume=mv.get("volume", 0)))
+
+    # مرور 1: درجات جيدة
+    for r in sorted(results, key=lambda x: -{"A+":3,"A":2,"B":1,"C":0}.get(x.get("grade"), -1)):
+        if r.get("grade") not in ("A+", "A", "B"):
+            continue
+        if r["sym"] in EXCLUDE_TICKERS:
+            continue
+        mv = next((x for x in all_movers if x["symbol"] == r["sym"]), {"change": 0, "volume": 0})
+        if r["side"] == 1 and len(longs) < 2:
+            _add(longs, r, mv)
+        elif r["side"] == -1 and len(shorts) < 2:
+            _add(shorts, r, mv)
+
+    # مرور 2: أي درجة (بما فيها C) لملء الناقص
+    if len(longs) < 2 or len(shorts) < 2:
+        for r in results:
+            if r["sym"] in EXCLUDE_TICKERS:
+                continue
+            mv = next((x for x in all_movers if x["symbol"] == r["sym"]), {"change": 0, "volume": 0})
+            if r["side"] == 1 and len(longs) < 2:
+                _add(longs, r, mv)
+            elif r["side"] == -1 and len(shorts) < 2:
+                _add(shorts, r, mv)
+
+    # مرور 3: من أقوى الرابحين/الخاسرين مع قبول أي اتجاه محلل
+    if len(longs) < 2:
+        for g in gainers:
+            if len(longs) >= 2: break
+            if g["symbol"] in EXCLUDE_TICKERS: continue
+            if any(x["res"]["sym"] == g["symbol"] for x in longs + shorts): continue
+            try:
+                r = get_analysis(g["symbol"], force=True)
+                if not r or not r.get("lv"): continue
+                r = dict(r)
+                if r.get("side") != 1:
+                    # ابنِ مستويات شراء مناسبة للرابح
+                    atr = float(r["lv"].get("atr") or r["price"] * 0.02)
+                    hypo = _hypo_levels(r["price"], 1, atr)
+                    r["side"] = 1; r["lv"] = hypo; r["grade"] = r.get("grade") or "C"
+                _add(longs, r, g)
+            except Exception:
+                continue
+    if len(shorts) < 2:
+        for g in losers:
+            if len(shorts) >= 2: break
+            if g["symbol"] in EXCLUDE_TICKERS: continue
+            if any(x["res"]["sym"] == g["symbol"] for x in longs + shorts): continue
+            try:
+                r = get_analysis(g["symbol"], force=True)
+                if not r or not r.get("lv"): continue
+                r = dict(r)
+                if r.get("side") != -1:
+                    atr = float(r["lv"].get("atr") or r["price"] * 0.02)
+                    hypo = _hypo_levels(r["price"], -1, atr)
+                    r["side"] = -1; r["lv"] = hypo; r["grade"] = r.get("grade") or "C"
+                _add(shorts, r, g)
+            except Exception:
+                continue
+    return longs[:2], shorts[:2]
 
 def _format_daily_card(res,side_label,change,volume):
     lv=res["lv"]; decision="🟢 شراء" if res["side"]==1 else "🔴 بيع"
@@ -2330,14 +2435,20 @@ def golden_score(sym,debug=False,relaxed=False):
                 if debug: return dict(sym=sym,score=0,reasons=[f"الدرجة {res['grade']} غير كافية"])
                 return None
         else:
-            if res["grade"] not in ("A+","A","B"):
+            # relaxed: نقبل B و C إذا بقيت شروط الاتجاه سليمة
+            if res["grade"] not in ("A+","A","B","C"):
                 if debug: return dict(sym=sym,score=0,reasons=[f"الدرجة {res['grade']} غير كافية (relaxed)"])
                 return None
+            if res.get("forced") and res["grade"] == "C":
+                # الصفقة المفروضة ضعيفة — نسمح بها فقط إن وُجد زخم/نموذج داعم لاحقاً
+                pass
         side=res["side"]; price=res["price"]; atr=res["lv"]["atr"]
         pats=res.get("patterns",[])
-        for p in pats:
-            if p["bias"]=="bearish" and side==1: return None
-            if p["bias"]=="bullish" and side==-1: return None
+        # لا ترفض بسبب نموذج معاكس في الوضع relaxed (فقط تحذير داخل النقاط)
+        if not relaxed:
+            for p in pats:
+                if p["bias"]=="bearish" and side==1: return None
+                if p["bias"]=="bullish" and side==-1: return None
         cfg=get_golden_config()
         df=res["df"]; last=df.iloc[-1]
         rsi_v=float(res["rsi"])
@@ -2371,8 +2482,10 @@ def golden_score(sym,debug=False,relaxed=False):
             risk=abs(price-sl),trend_1d=res["trend_d"],trend_4h=res["trend"],
             change_7d=0,rsi=rsi_v,rvol=rvol,source=res.get("source","binance_fut"),
             patterns=pats)
+    except (PairNotFound, NoData) as e:
+        return None
     except Exception as e:
-        log.error(f"golden_score err {sym}: {e}")
+        log.debug(f"golden_score err {sym}: {e}")
         return None
 
 def _run_golden_scan(syms,max_results,progress_cb,relaxed=False):
@@ -5058,6 +5171,46 @@ class _FakeUpdate:
     def __init__(self,msg,user):
         self.message=msg; self.effective_user=user; self.callback_query=None
 
+@vip_only
+async def cmd_radar(update, ctx):
+    """مسح يدوي لرادار الفرص المبكرة + تنبيه VIP والأدمن."""
+    wait = await update.message.reply_text("⚡ <b>رادار الفرص المبكرة</b>\n⏳ مسح السوق (15د)...", parse_mode=ParseMode.HTML)
+    try:
+        syms = await asyncio.to_thread(top_symbols, 80)
+        hits = await asyncio.to_thread(radar_scan, syms)
+        if not hits:
+            await wait.edit_text("⚡ لا توجد فرص مبكرة حالياً (السوق هادئ)."); return
+        lines = [f"⚡ <b>رادار الفرص المبكرة</b> · {len(hits)} فرصة", "━━━━━━━━━━━━━━━━", ""]
+        for h in hits[:12]:
+            side_e = "🟢 LONG" if h["side"] == 1 else "🔴 SHORT"
+            cl = coin_link(h["sym"], "binance_fut")
+            lines.append(f"{side_e} <a href='{cl}'>#{h['sym']}</a> · {fmt(h['price'])}")
+            lines.append(f"   تحرك {h['move']:+.1f}% | حجم ×{h['vol_ratio']} | 24س {h['ch24']:+.1f}%")
+            lv = h["lv"]
+            lines.append(f"   ➡️ {fmt(lv['entry'])} | 🛑 {fmt(lv['sl'])} | 🎯 {fmt(lv['tps'][0]['px'])}")
+            lines.append("")
+            key = f"{h['sym']}:{h['bar_t']}"
+            if key not in _radar_seen:
+                _radar_seen[key] = time.time()
+                if not any(p.get("coin") == h["sym"] and p.get("state") in ("pending", "open") for p in active_signals()):
+                    try: await asyncio.to_thread(track_signal, h)
+                    except Exception: pass
+        lines += [RISK_WARNING_AR, f"👤 {BRAND}"]
+        txt = "\n".join(lines)[:4000]
+        await wait.edit_text(txt, parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
+        for chat in (VIP_CHANNEL_ID, ADMIN_ID or None):
+            if not chat: continue
+            if update.effective_chat and chat == update.effective_chat.id: continue
+            try:
+                await ctx.bot.send_message(chat, txt, parse_mode=ParseMode.HTML,
+                                           protect_content=(PROTECT if chat != ADMIN_ID else False),
+                                           link_preview_options=NO_PREVIEW)
+            except Exception as _ex: log.debug("cmd_radar notify: %s", _ex)
+    except Exception as e:
+        log.exception("cmd_radar")
+        try: await wait.edit_text(f"⚠️ {str(e)[:150]}")
+        except Exception: pass
+
 ADMIN_CMD_MAP={
     "/forcepost":cmd_forcepost,"/clearsignals":cmd_clearsignals,
     "/smartcleanup":cmd_smartcleanup,"/debug":cmd_debug,"/daily":cmd_daily,
@@ -5068,7 +5221,8 @@ ADMIN_CMD_MAP={
     "/viplist":cmd_viplist,"/stats":cmd_stats,"/history":cmd_history,
     "/dashboard":cmd_dashboard,"/testchannels":cmd_testchannels,"/delist":cmd_delist,
     "/golden":cmd_golden,"/goldenconfig":cmd_goldenconfig,"/share":cmd_share,
-    "/alpha_v2":cmd_alpha_radar_v2,"/patterns":cmd_patterns,"/neon":cmd_neon}
+    "/alpha_v2":cmd_alpha_radar_v2,"/patterns":cmd_patterns,"/neon":cmd_neon,
+    "/radar":cmd_radar}
 
 ADMIN_ARGS_HINTS={
     "liquidity":"أرسل: /liquidity BTC","futures":"أرسل: /futures BTC",
@@ -5706,45 +5860,6 @@ async def shadow_loop(app):
         await asyncio.sleep(CYCLE_RADAR)
 
 
-@vip_only
-async def cmd_radar(update, ctx):
-    """مسح يدوي لرادار الفرص المبكرة + تنبيه VIP والأدمن."""
-    wait = await update.message.reply_text("⚡ <b>رادار الفرص المبكرة</b>\n⏳ مسح السوق (15د)...", parse_mode=ParseMode.HTML)
-    try:
-        syms = await asyncio.to_thread(top_symbols, 80)
-        hits = await asyncio.to_thread(radar_scan, syms)
-        if not hits:
-            await wait.edit_text("⚡ لا توجد فرص مبكرة حالياً (السوق هادئ)."); return
-        lines = [f"⚡ <b>رادار الفرص المبكرة</b> · {len(hits)} فرصة", "━━━━━━━━━━━━━━━━", ""]
-        for h in hits[:12]:
-            side_e = "🟢 LONG" if h["side"] == 1 else "🔴 SHORT"
-            cl = coin_link(h["sym"], "binance_fut")
-            lines.append(f"{side_e} <a href='{cl}'>#{h['sym']}</a> · {fmt(h['price'])}")
-            lines.append(f"   تحرك {h['move']:+.1f}% | حجم ×{h['vol_ratio']} | 24س {h['ch24']:+.1f}%")
-            lv = h["lv"]
-            lines.append(f"   ➡️ {fmt(lv['entry'])} | 🛑 {fmt(lv['sl'])} | 🎯 {fmt(lv['tps'][0]['px'])}")
-            lines.append("")
-            key = f"{h['sym']}:{h['bar_t']}"
-            if key not in _radar_seen:
-                _radar_seen[key] = time.time()
-                if not any(p.get("coin") == h["sym"] and p.get("state") in ("pending", "open") for p in active_signals()):
-                    try: await asyncio.to_thread(track_signal, h)
-                    except Exception: pass
-        lines += [RISK_WARNING_AR, f"👤 {BRAND}"]
-        txt = "\n".join(lines)[:4000]
-        await wait.edit_text(txt, parse_mode=ParseMode.HTML, link_preview_options=NO_PREVIEW)
-        for chat in (VIP_CHANNEL_ID, ADMIN_ID or None):
-            if not chat: continue
-            if update.effective_chat and chat == update.effective_chat.id: continue
-            try:
-                await ctx.bot.send_message(chat, txt, parse_mode=ParseMode.HTML,
-                                           protect_content=(PROTECT if chat != ADMIN_ID else False),
-                                           link_preview_options=NO_PREVIEW)
-            except Exception as _ex: log.debug("cmd_radar notify: %s", _ex)
-    except Exception as e:
-        log.exception("cmd_radar")
-        try: await wait.edit_text(f"⚠️ {str(e)[:150]}")
-        except Exception: pass
 
 async def cmd_shadow(update, ctx):
     if not update.effective_user or update.effective_user.id != ADMIN_ID: return
