@@ -495,7 +495,8 @@ PAYMENT_INFO = _e("PAYMENT_INFO", "Binance Pay: 905142395")
 PROTECT = _e("PROTECT_CONTENT", "1") == "1"
 MAINTENANCE = _e("MAINTENANCE", "0") == "1"
 BRAND = "💎 Ryma Crypto 💎"
-BOT_VERSION = "diag-2 · 2026-11-07"
+BOT_VERSION = "shadow-1 · 2026-11-08"
+CYCLE_RADAR = 300
 WHALE_MIN_USD = 500000
 
 RISK_WARNING_AR = "⚠️ <i>التداول ينطوي على مخاطر عالية. يرجى إدارة رأس المال بذكاء. ليست نصيحة مالية.</i>"
@@ -5606,6 +5607,84 @@ def get_crypto_news(symbol):
     except Exception as _ex: log.debug('ignored: %s', _ex)
     return "لا توجد أخبار هامة حالياً."
 
+# ============ رادار الفرص المبكرة (وضع الظل) ============
+_radar_seen = {}
+
+def radar_scan(symbols):
+    """يرصد عملات بدأت تتحرك بقوة وحجم استثنائي قبل أن تظهر في قائمة الترند (تقريباً: تغير 24 ساعة أقل من 10%).
+    الشروط: صعود ≥5% خلال شمعتين (15 دقيقة × 2)، حجم الشمعة ≥3× متوسط آخر 20، وإغلاق فوق أعلى 20 شمعة سابقة.
+    يرجع قائمة إشارات بنفس بنية analyze() لتسجيلها في نظام التتبع."""
+    out = []
+    for s in symbols:
+        try:
+            df = get_candles(s, "15m", 80, ttl=60, min_bars=40)
+            d = add_indicators(df, 100)
+            if len(d) < 25: continue
+            last = len(d) - 1
+            c = d["close"]; v = d["volume"]; h = d["high"]
+            move = float(c.iloc[last] / c.iloc[last - 2] - 1)
+            if move < 0.05: continue
+            base_v = float(v.iloc[last - 20:last].mean())
+            if base_v <= 0: continue
+            vol_ratio = float(v.iloc[last]) / base_v
+            if vol_ratio < 3: continue
+            if float(c.iloc[last]) < float(h.iloc[last - 20:last].max()): continue
+            _p, ch24, _c7 = ticker_change(s)
+            if ch24 is None or ch24 >= 10: continue
+            atr = float(d["atr"].iloc[last])
+            price = float(c.iloc[last])
+            if not (atr > 0 and price > 0): continue
+            risk = 2.5 * atr
+            tp_px = price + 0.6 * risk
+            lv = dict(entry=price, sl=price - risk, risk=risk, atr=atr,
+                      tps=[dict(px=tp_px, pct=round(100 * 0.6 * risk / price, 2), frac=1.0, hit=False, src="radar")])
+            out.append(dict(sym=s, tf="15m", side=1, lv=lv, bar_t=int(d["t"].iloc[last]),
+                            grade="R", setup="RADAR", source="binance_fut",
+                            move=round(move * 100, 2), vol_ratio=round(vol_ratio, 1), ch24=round(ch24, 2), price=price))
+        except Exception:
+            continue
+    return out
+
+async def shadow_loop(app):
+    await asyncio.sleep(120)
+    while True:
+        try:
+            cutoff = time.time() - 48 * 3600
+            for k in [k for k, t in _radar_seen.items() if t < cutoff]: _radar_seen.pop(k, None)
+            syms = await asyncio.to_thread(top_symbols, 80)
+            hits = await asyncio.to_thread(radar_scan, syms)
+            new = []
+            for hit in hits:
+                key = f"{hit['sym']}:{hit['bar_t']}"
+                if key in _radar_seen: continue
+                _radar_seen[key] = time.time()
+                if any(p.get("coin") == hit["sym"] and p.get("state") in ("pending", "open") for p in active_signals()):
+                    continue
+                await asyncio.to_thread(track_signal, hit)
+                new.append(hit)
+            if new and ADMIN_ID:
+                lines = [f"🧪 رادار (وضع الظل): {len(new)} رصد جديد"]
+                for h in new:
+                    lines.append(f"• {h['sym']} | سعر {fmt(h['price'])} | صعود {h['move']}% | حجم ×{h['vol_ratio']} | 24س {h['ch24']}%")
+                try: await app.bot.send_message(ADMIN_ID, "\n".join(lines))
+                except Exception as _ex: log.debug('ignored: %s', _ex)
+        except asyncio.CancelledError: raise
+        except Exception: log.exception("shadow_loop")
+        await asyncio.sleep(CYCLE_RADAR)
+
+async def cmd_shadow(update, ctx):
+    if not update.effective_user or update.effective_user.id != ADMIN_ID: return
+    with store.lock:
+        hist = [x for x in store.data["history"] if x.get("setup") == "RADAR"]
+        act = [p for p in store.data["signals"] if p.get("setup") == "RADAR" and p.get("state") in ("pending", "open")]
+    rs = [x["R"] for x in hist if x.get("R") is not None]
+    wins = sum(1 for r in rs if r > 0)
+    gross = sum(r for r in rs if r > 0); loss = -sum(r for r in rs if r <= 0)
+    pf = round(gross / loss, 2) if loss > 0 else "—"
+    await update.message.reply_text(
+        f"🧪 وضع الظل — الرادار\nمغلقة: {len(rs)} | رابحة: {wins}\nمجموع R بعد الرسوم: {sum(rs):+.2f} | PF: {pf}\nمفتوحة الآن: {len(act)}\n"
+        f"ملاحظة: هذه نتائج داخلية فقط، لم تُنشر لأحد.")
+
 async def post_init(app):
     try: await app.bot.delete_webhook(drop_pending_updates=False)
     except Exception as _ex: log.debug('ignored: %s', _ex)
@@ -5619,6 +5698,7 @@ async def post_init(app):
         n=await asyncio.to_thread(smart_cleanup_trades)
         log.info(f"startup: smart_cleanup نظّفت {n} صفقة")
     except Exception as e: log.warning(f"startup cleanup: {e}")
+    
     app.bot_data["tasks"]=[
         asyncio.create_task(autopost_loop(app)),asyncio.create_task(tracker_loop(app)),
         asyncio.create_task(predict_loop(app)),asyncio.create_task(market_summary_loop(app)),
@@ -5628,6 +5708,7 @@ async def post_init(app):
         asyncio.create_task(whale_hunter_loop(app)),
         asyncio.create_task(weekly_report_loop(app)),asyncio.create_task(trial_notice_loop(app)),
         asyncio.create_task(morning_brief_loop(app))]
+        
     log.info("version %s",BOT_VERSION)
     log.info("ryma FINAL (engine+always-trade) | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$500000 | SL≤2.5%% | RR≥1.5 | hype=admin | neon=admin | patterns_chart=admin",
              MAX_OPEN,CYCLE_GOLDEN,get_golden_config().get("min_score",1),is_multi_exchange(),
@@ -5663,6 +5744,7 @@ def main():
         ("btdiag",cmd_btdiag),("exportdata",cmd_exportdata),("fear",cmd_fear),("market",cmd_market),("top",cmd_top),("tools",cmd_tools),("risk",cmd_riskcalc)]
     for name,fn in handlers: app.add_handler(CommandHandler(name,fn))
     app.add_handler(TypeHandler(Update,log_updates),group=-1)
+    app.add_handler(CommandHandler("shadow", cmd_shadow))
     app.add_handler(CommandHandler("botinfo",cmd_botinfo))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,on_text))
