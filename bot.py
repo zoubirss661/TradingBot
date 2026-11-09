@@ -2141,10 +2141,20 @@ def analyze(sym):
     atr_now=float(ed["atr"].iloc[-1]) if not pd.isna(ed["atr"].iloc[-1]) else price*0.02
     forced=False
     if wait:
-        # لا صفقات مفروضة: النتيجة انتظار. المستويات افتراضية للعرض فقط (لا تُنشر ولا تُتتبع)
-        side=0; grade="WAIT"
-        disp_side=cand or (1 if price>=float(ed["ema50"].iloc[-1]) else -1)
-        lv=_hypo_levels(price,disp_side,atr_now)
+        # البوت يعطي صفقة دائماً: إن لم تتحقق شروط الجودة تُعرض بدرجة C مع تحذير واضح
+        # (forced=True تمنع نشرها تلقائياً في القنوات وفي الفرصة الذهبية)
+        forced=True
+        side=cand
+        if not side and ed_d is not None: side=_sgn_i(se.trend_state(ed_d,len(ed_d)-1))
+        if not side: side=1 if price>=float(ed["ema50"].iloc[-1]) else -1
+        lv=None
+        try:
+            lv,_w=se.build_levels(ed,len(ed)-1,side,price,atr_now,ed_d,
+                                  (len(ed_d)-1) if ed_d is not None else None,
+                                  dict(se.CFG,max_sl_atr=4.0,min_rr_tp1=0.8))
+        except Exception: lv=None
+        if lv is None: lv=_hypo_levels(price,side,atr_now)
+        grade="C"; wait=False
     else:
         side=ev["side"]; grade=ev["grade"]; lv=ev["lv"]
     if lv is None: raise NoData(sym)
