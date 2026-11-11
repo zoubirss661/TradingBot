@@ -9,9 +9,9 @@ import types as _types
 ENG_TP_FRACS = [0.50, 0.25, 0.15, 0.10]
 
 ENG_CFG = dict(
-    min_score=8.5,        # حد جودة مرتفع لتقليل الإشارات الضعيفة
-    grade_a=8.5,
-    grade_aplus=10.5,
+    min_score=8.5,        # رفع الحد الأدنى: صفقات أقل لكنها ممتازة فقط (A/A+)
+    grade_a=9.5,
+    grade_aplus=11.0,
     min_adx=20.0,         # أقل من هذا = سوق عرضي
     max_ext_atr=2.5,      # أقصى بعد عن EMA20 عند الدخول (لا مطاردة)
     rsi_long_max=70.0,
@@ -25,9 +25,9 @@ ENG_CFG = dict(
     pivot_lb_entry=150,
     pivot_lb_htf=120,
     swing_lb=40,
-    be_offset_r=0.08,     # نقطة التعادل = الدخول + 0.05R (تغطي الرسوم)
+    be_offset_r=0.08,     # نقطة التعادل = الدخول + 0.08R (تغطي الرسوم)
     trail_atr=2.5,
-    max_risk_pct=0.08,    # سقف المخاطرة كنسبة من السعر
+    max_risk_pct=0.03,    # سقف صارم: وقف الخسارة لا يتجاوز 3% من سعر الدخول أبداً
     min_price_pct=0.05,   # أدنى سعر هدف للشورت (لا أهداف سالبة)
     max_hold=6,          # يوم تداول: ~24 ساعة على فريم 4س
 )
@@ -153,14 +153,10 @@ def eng_build_levels(df, i, side, price, atr, htf=None, htf_i=None, cfg=ENG_CFG)
     if dist < cfg["min_sl_atr"] * atr:
         dist = cfg["min_sl_atr"] * atr
         sl = price - side * dist
-    max_risk_pct = cfg.get("max_risk_pct", 0.08)
+    max_risk_pct = cfg.get("max_risk_pct", 0.03)
     if dist > price * max_risk_pct:
         dist = price * max_risk_pct
         sl = price - side * dist
-    # قص الوقف هنا أيضاً حتى تُبنى الأهداف على مخاطرة لا تتجاوز 3%.
-    if abs(price - sl) / price > 0.03:
-        sl = price * (1 - side * 0.03)
-        dist = abs(price - sl)
     risk = dist
 
     # ---- مستويات الأهداف (قمم/قيعان 4س + يومي)
@@ -210,7 +206,7 @@ def eng_build_levels(df, i, side, price, atr, htf=None, htf_i=None, cfg=ENG_CFG)
         targets.append(base + side * step)
         srcs.append("R")
     # سقف المخاطرة كنسبة من السعر (مهم للعملات الرخيصة مثل UAI)
-    max_risk_pct = cfg.get("max_risk_pct", 0.08)
+    max_risk_pct = cfg.get("max_risk_pct", 0.03)
     if risk > price * max_risk_pct:
         risk = price * max_risk_pct
         sl = price - side * risk
@@ -241,12 +237,25 @@ def eng_build_levels(df, i, side, price, atr, htf=None, htf_i=None, cfg=ENG_CFG)
         sl = min(sl, price * (1 + max_risk_pct))  # سقف وقف الشورت
     else:
         sl = max(sl, price * (1 - max_risk_pct))
-    # حد أمان نهائي وصارم: لا يتجاوز وقف الخسارة 3% من سعر الدخول.
+    # ---- حماية صارمة: وقف الخسارة لا يتجاوز أبداً 3% من سعر الدخول (منع كارثة مثل JCT)
     if abs(price - sl) / price > 0.03:
         sl = price * (1 - side * 0.03)
     risk = abs(price - sl)
     if risk <= 0:
         return None, "مخاطرة غير صالحة"
+    # إعادة ضبط أهداف TP1 لتضمن RR>=min_rr بعد قص الوقف
+    min_tp1 = risk * cfg["min_rr_tp1"]
+    if tps and abs(tps[0]["px"] - price) < min_tp1:
+        tps[0]["px"] = float(price + side * min_tp1)
+        tps[0]["pct"] = round(100 * side * (tps[0]["px"] - price) / price, 2)
+        # إعادة ترتيب الأهداف اللاحقة إن لزم
+        last_px = tps[0]["px"]
+        for k in range(1, len(tps)):
+            if abs(tps[k]["px"] - price) <= abs(last_px - price):
+                step = max(0.5 * risk, 0.35 * atr)
+                tps[k]["px"] = float(last_px + side * step)
+                tps[k]["pct"] = round(100 * side * (tps[k]["px"] - price) / price, 2)
+            last_px = tps[k]["px"]
     lv = dict(entry=float(price), sl=float(sl), risk=float(risk), tps=tps, atr=float(atr))
     return lv, ""
 
@@ -318,14 +327,6 @@ def eng_evaluate(df, htf=None, ltf=None, price=None, i=None, htf_i=None, ltf_i=N
     score = 0.0
     why = res["reasons"]
     score += abs(htf_t) if htf is not None else 1.0
-
-    # EMA21/EMA55: مكافأة عندما يكون ترتيب المتوسطات متوافقاً مع اتجاه الصفقة.
-    ema21 = float(df["ema21"].iat[i]) if "ema21" in df and not np.isnan(df["ema21"].iat[i]) else np.nan
-    ema55 = float(df["ema55"].iat[i]) if "ema55" in df and not np.isnan(df["ema55"].iat[i]) else np.nan
-    if np.isfinite(ema21) and np.isfinite(ema55):
-        if (side == 1 and ema21 > ema55) or (side == -1 and ema21 < ema55):
-            score += 2.0
-            why.append("تقاطع/ترتيب EMA21 وEMA55 يدعم الاتجاه على 4س")
     score += abs(etf)
     why.append("اتجاه يومي %s / 4س %s" % ("متوافق" if htf_t * side > 0 else "محايد",
                                           "قوي" if abs(etf) == 2 else "متوافق"))
@@ -359,20 +360,58 @@ def eng_evaluate(df, htf=None, ltf=None, price=None, i=None, htf_i=None, ltf_i=N
         score += 0.3
 
     rv = float(df["rvol"].iat[i]) if not np.isnan(df["rvol"].iat[i]) else 1.0
-    if rv > 1.5:
+    if rv >= 1.2:
         score += 1.0
-        why.append("حجم تداول قوي (RVOL ×%.1f)" % rv)
+        why.append("حجم أعلى من المتوسط ×%.1f" % rv)
     elif rv >= 0.9:
         score += 0.3
     elif rv < 0.7:
         score -= 1.0
         res["warnings"].append("حجم ضعيف ×%.1f" % rv)
 
-    if abs(price - ema20) < 1.5 * atr:
+    if -1.0 <= ext <= 1.5:
         score += 1.0
-        why.append("السعر قريب من EMA20 ضمن 1.5 ATR")
-    elif ext < -1.5:
+        why.append("دخول قريب من المتوسط (ليس مطاردة)")
+    elif ext < -1.0:
         score -= 0.5
+
+    # ---- تقاطع EMA21 / EMA55 (اتجاه الترند على 4س)
+    try:
+        e21 = float(df["ema21"].iat[i]) if "ema21" in df.columns else float("nan")
+        e55 = float(df["ema55"].iat[i]) if "ema55" in df.columns else float("nan")
+        e21_prev = float(df["ema21"].iat[i-1]) if "ema21" in df.columns and i >= 1 else float("nan")
+        e55_prev = float(df["ema55"].iat[i-1]) if "ema55" in df.columns and i >= 1 else float("nan")
+        if not any(np.isnan(x) for x in (e21, e55, e21_prev, e55_prev)):
+            # تقاطع صاعد: EMA21 يعبر فوق EMA55
+            if e21_prev <= e55_prev and e21 > e55 and side == 1:
+                score += 2.0
+                why.append("تقاطع صاعد EMA21 فوق EMA55")
+            # تقاطع هابط: EMA21 يعبر تحت EMA55
+            elif e21_prev >= e55_prev and e21 < e55 and side == -1:
+                score += 2.0
+                why.append("تقاطع هابط EMA21 تحت EMA55")
+            # استمرار الترند (محاذاة)
+            elif (e21 > e55 and side == 1) or (e21 < e55 and side == -1):
+                score += 0.5
+    except Exception:
+        pass
+
+    # ---- Quality Score (قواعد تحليل فني — ليس نموذج ML/LLM)
+    # قرب من EMA20 (<1.5 ATR) + حجم + نماذج: تعزيز جودة الإشارة فقط
+    if abs(ext) <= 1.5:
+        score += 1.0
+        why.append("جودة: سعر قريب من EMA20")
+    rv_q = float(df["rvol"].iat[i]) if not np.isnan(df["rvol"].iat[i]) else 1.0
+    if rv_q >= 1.5:
+        score += 1.0
+        why.append("جودة: حجم استثنائي ×%.1f" % rv_q)
+    if patterns:
+        for p in patterns:
+            b = p.get("bias")
+            if (b == "bullish" and side == 1) or (b == "bearish" and side == -1):
+                score += 1.0
+                why.append("جودة: نموذج %s يدعم" % p.get("name", ""))
+                break  # مرة واحدة فقط
 
     score += max(-1.5, min(1.5, 0.5 * fut_score))
     if fut_score >= 2:
@@ -380,20 +419,15 @@ def eng_evaluate(df, htf=None, ltf=None, price=None, i=None, htf_i=None, ltf_i=N
     elif fut_score <= -2:
         res["warnings"].append("بيانات الفيوتشر ضد الاتجاه")
 
-    pattern_support = False
     if patterns:
         for p in patterns:
             b = p.get("bias")
             if (b == "bullish" and side == 1) or (b == "bearish" and side == -1):
                 score += 1.0
-                pattern_support = True
                 why.append("نموذج %s يدعم الصفقة" % p.get("name", ""))
             elif b in ("bullish", "bearish"):
                 score -= 1.5
                 res["warnings"].append("نموذج %s عكس الصفقة" % p.get("name", ""))
-    # نقاط جودة الإعداد (Quality Score) مستقلة وواضحة.
-    if pattern_support:
-        why.append("تأكيد جودة: نموذج فني يدعم الاتجاه")
     if btc_trend * side < 0:
         score -= 1.0
         res["warnings"].append("البيتكوين عكس اتجاه الصفقة")
@@ -436,10 +470,8 @@ def eng_evaluate(df, htf=None, ltf=None, price=None, i=None, htf_i=None, ltf_i=N
 
 
 # ----------------------------------------------------------------- محاكاة / Backtest
-def eng_simulate(df_raw, htf_raw=None, start=260, cfg=None, fee=0.0008, slip=0.0005,
-                 btc_trend=0, prepared=None, capital=1000.0,
-                 funding_rate=0.0001, funding_interval_hours=8.0):
-    """Backtest سببي مع مخاطرة نقدية ثابتة 1% ورسوم تمويل تقديرية."""
+def eng_simulate(df_raw, htf_raw=None, start=260, cfg=None, fee=0.0008, slip=0.0005, btc_trend=0, prepared=None):
+    """Backtest مشي-للأمام: كل قرار يستخدم بيانات حتى الشمعة i فقط (لا تجسس على المستقبل)."""
     cfg = cfg or ENG_CFG
     if prepared is not None:
         d, htf = prepared
@@ -465,7 +497,6 @@ def eng_simulate(df_raw, htf_raw=None, start=260, cfg=None, fee=0.0008, slip=0.0
         kind, j = "TIME", i + 1
         while j < n:
             h, l = H[j], L[j]
-            # قاعدة محافظة للشمعة التي تلمس SL وTP معاً: نعتمد SL أولاً.
             if (s == 1 and l <= sl) or (s == -1 and h >= sl):
                 realized += remaining * s * (sl - fill) / risk
                 kind = "TRAIL" if trail else ("BE" if be else "SL")
@@ -500,25 +531,21 @@ def eng_simulate(df_raw, htf_raw=None, start=260, cfg=None, fee=0.0008, slip=0.0
         if remaining > 1e-9:
             jj = min(j, n - 1)
             realized += remaining * s * (C[jj] - fill) / risk
-        # مخاطرة نقدية ثابتة: 1% من رأس المال لكل صفقة.
-        capital = max(0.0, float(capital))
-        risk_cash = capital * 0.01
-        position_size = (risk_cash / risk) if risk > 0 else 0.0  # كمية الأصل
-        position_value = position_size * fill
-        # الرسوم والانزلاق بوحدة R؛ مكافئان لخصمهما من قيمة الصفقة الفعلية.
-        cost = 2 * (fee + slip) * fill / risk
+        # حجم الصفقة على أساس مخاطرة ثابتة 1% من رأس المال الافتراضي (وحدة R = 1)
+        # في الباك تست نعمل بوحدة R؛ التكلفة تشمل رسوم الدخول+الخروج + تقدير تمويل
+        position_size = 1.0
+        # رسوم تداول + انزلاق (دخول وخروج)
+        trade_cost = 2 * (fee + slip) * fill * position_size / risk
+        # تقدير رسوم التمويل: ~0.01% كل 8 ساعات × عدد الفترات خلال الصفقة
         bars_held = max(1, min(j, n - 1) - i)
-        held_hours = (bars_held * tfms) / 3_600_000
-        funding_periods = held_hours / max(float(funding_interval_hours), 1e-9)
-        funding_cost_r = max(0.0, s * float(funding_rate)) * funding_periods * fill / risk
-        total_cost = cost + funding_cost_r
+        # tfms تقريباً 4h → كل شمعة ≈ 0.5 فترة تمويل (8h)
+        funding_periods = bars_held * (tfms / 28_800_000.0)  # 8h = 28800000 ms
+        funding_est = abs(0.0001 * funding_periods)  # 0.01% لكل فترة تمويل (محافظة)
+        cost = trade_cost + funding_est
         _adx = d["adx"].iat[i]
-        trades.append(dict(t=int(t_arr[i]), side=s, grade=ev["grade"], R=round(realized - total_cost, 3),
+        trades.append(dict(t=int(t_arr[i]), side=s, grade=ev["grade"], R=round(realized - cost, 3),
                            exit=kind, bars=bars_held, tps=sum(t["hit"] for t in tps),
-                           cost=round(float(cost), 4), funding_cost=round(float(funding_cost_r), 4),
-                           risk_cash=round(float(risk_cash), 4), position_size=round(float(position_size), 8),
-                           position_value=round(float(position_value), 4),
-                           pnl_cash=round(float((realized - total_cost) * risk_cash), 4), score=ev["score"],
+                           cost=round(float(cost), 4), score=ev["score"],
                            adx=float(_adx) if _adx == _adx else 0.0,
                            sl_atr=round(risk / lv["atr"], 2), rr1=ev["rr"][0]))
         i = min(j, n - 1) + 1
@@ -587,12 +614,13 @@ PAYMENT_INFO = _e("PAYMENT_INFO")
 PROTECT = _e("PROTECT_CONTENT", "1") == "1"
 MAINTENANCE = _e("MAINTENANCE", "0") == "1"
 BRAND = "💎 Ryma Crypto 💎"
-BOT_VERSION = "daytrader-3 · 2026-11-10"
+BOT_VERSION = "daytrader-4.2-alerts-only · 2026-11-11"
+# PRINCIPLE: alerts & analysis only — never places exchange orders
 CYCLE_RADAR = 300
 WHALE_MIN_USD = 500000
 
-RISK_WARNING_AR = "⚠️ <i>التداول ينطوي على مخاطر عالية. يرجى إدارة رأس المال بذكاء. ليست نصيحة مالية.</i>"
-RISK_WARNING_EN = "⚠️ <i>Trading involves high risk. Please manage your capital wisely. Not financial advice.</i>"
+RISK_WARNING_AR = "⚠️ <i>التداول ينطوي على مخاطر عالية. البوت للتنبيه والتحليل فقط ولا ينفّذ صفقات. ليست نصيحة مالية.</i>"
+RISK_WARNING_EN = "⚠️ <i>Trading involves high risk. This bot is alerts/analysis only and does not execute trades. Not financial advice.</i>"
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 def _btn(text, style=None, **kw):
@@ -1446,12 +1474,14 @@ def pump_radar(sym):
     except Exception: return None
 
 def bottom_radar(sym):
+    """قيعان مرشحة للشراء — تُعرض فقط إذا المحرك لا يعارض بشدة (ليس SHORT مؤكد)."""
     try:
         df=get_candles(sym,"4h",400,ttl=300,min_bars=200)
         if df.empty or len(df)<200: return None
         df=add_indicators(df,100); last=df.iloc[-1]
         if pd.isna(last["rsi"]) or pd.isna(last["ema200"]): return None
         price=float(last["close"]); ema200=float(last["ema200"])
+        if price < 0.000001: return None
         diff_pct=(price/ema200-1)*100
         if not (BOTTOM_MIN_DIFF<=diff_pct<=BOTTOM_MAX_DIFF): return None
         rsi_v=float(last["rsi"])
@@ -1465,21 +1495,32 @@ def bottom_radar(sym):
         low10=float(df["low"].tail(10).min())
         rebound_pct=(price/low10-1)*100
         if rebound_pct<BOTTOM_MIN_REBOUND: return None
+        eng = engine_direction(sym, price)
+        if eng == -1:
+            return None  # المحرك SHORT → لا قاع شراء
         if diff_pct<-40 and rsi_v<35 and vol_ratio>1.2: severity="فرصة قوية"
         elif diff_pct<-25 and rebound_pct>3: severity="فرصة جيدة"
         else: severity="مراقبة"
         return dict(diff=round(diff_pct,1),rsi=round(rsi_v,1),rebound=round(rebound_pct,2),
-                    vol_ratio=round(vol_ratio,2),severity=severity,price=round(price,6))
+                    vol_ratio=round(vol_ratio,2),severity=severity,price=round(price,6),
+                    side=1,engine_aligned=(eng==1))
     except Exception: return None
 
 def short_radar(sym):
+    """فرص الشورت فقط إذا المحرك يدعم SHORT (لا تناقض مع التحليل)."""
     try:
         df=get_candles(sym,"4h",200,ttl=300,min_bars=100)
         if df.empty or len(df)<100: return None
         df=add_indicators(df,100); last=df.iloc[-1]
         if pd.isna(last["rsi"]): return None
-        if last["rsi"]>55: return dict(rsi=round(float(last["rsi"]),1),price=round(float(last["close"]),6))
-        return None
+        price=float(last["close"])
+        if price < 0.000001: return None
+        # شرط أولي: RSI مرتفع نسبياً
+        if float(last["rsi"]) <= 55: return None
+        eng = engine_direction(sym, price)
+        if eng != -1:
+            return None  # المحرك ليس SHORT → لا تُعرض كفرصة شورت
+        return dict(rsi=round(float(last["rsi"]),1),price=round(price,6),side=-1,engine_aligned=True)
     except Exception: return None
 
 def alpha_radar(sym):
@@ -2108,6 +2149,73 @@ def _hypo_levels(price,side,atr):
     return dict(entry=float(price), sl=float(sl), risk=float(risk), tps=tps, atr=float(atr))
 
 _analysis_cache={}
+
+def engine_direction(sym, price=None):
+    """اتجاه المحرك الرئيسي فقط (بدون forced).
+    يرجع: 1 LONG، -1 SHORT، 0 WAIT/محايد.
+    يُستخدم لضمان توافق الرادارات مع التحليل."""
+    try:
+        tf = default_tf(sym)
+        df = get_candles(sym, tf, 450, ttl=120, min_bars=MIN_BARS)
+        df = add_indicators(df, 100)
+        ed = _eng_df(df)
+        ed_d = None
+        try:
+            df_d = get_candles(sym, "1d", 250, ttl=300, min_bars=100)
+            ed_d = _eng_df(add_indicators(df_d, 100))
+        except Exception:
+            pass
+        ed_h = None
+        if tf != "1h":
+            try:
+                ed_h = _eng_df(get_candles(sym, "1h", 250, ttl=300, min_bars=100))
+            except Exception:
+                pass
+        px = price
+        if px is None:
+            px, _ = live_price(sym)
+            px = float(px or df["close"].iloc[-1])
+        if px < 0.000001:
+            return 0
+        try:
+            fut = futures_score_for(sym, _sgn_i(se.trend_state(ed, len(ed)-1)) or 1)
+            fut_score = fut.get("score", 0)
+        except Exception:
+            fut_score = 0
+        funding = oi_change = ls_ratio = liq_data = None
+        try: funding = futures_funding_rate(sym)
+        except Exception: pass
+        try:
+            oi = futures_oi_history(sym, "4h", 20)
+            oi_change = oi.get("change_pct") if oi else None
+        except Exception: pass
+        try: ls_ratio = futures_long_short_ratio(sym)
+        except Exception: pass
+        try: liq_data = futures_liquidations(sym)
+        except Exception: pass
+        patterns = []
+        btc_t = 0
+        if sym != "BTC":
+            try: btc_t = btc_trend_cached()
+            except Exception: pass
+        ev = se.evaluate(ed, ed_d, ed_h, price=px, fut_score=fut_score, btc_trend=btc_t,
+                         patterns=patterns, funding=funding, oi_change=oi_change,
+                         ls_ratio=ls_ratio, liq_data=liq_data)
+        if ev["status"] == "WAIT":
+            return 0
+        # MTF hard filter (same as analyze)
+        if ed_h is not None:
+            try:
+                h1_t = se.trend_state(ed_h, len(ed_h)-1)
+                if ev["side"] == 1 and h1_t == -2: return 0
+                if ev["side"] == -1 and h1_t == 2: return 0
+            except Exception:
+                pass
+        return int(ev["side"])
+    except Exception:
+        return 0
+
+
 def analyze(sym):
     tf=default_tf(sym); df=None; last_err=None
     fallbacks=[tf]+[x for x in ("1h","4h","1d") if x!=tf]
@@ -2127,8 +2235,9 @@ def analyze(sym):
         long_ok=detect_core_conditions(df,i,1); short_ok=detect_core_conditions(df,i,-1)
         strategy="Core"
     price,_=live_price(sym); price=float(price or df["close"].iloc[-1])
-    if not np.isfinite(price) or price < 0.000001:
-        raise NoData(f"{sym}: السعر أقل من الحد الأدنى الآمن 0.000001")
+    # حماية من العملات الرخيصة جداً (shitcoins) — انزلاق سعري كارثي
+    if price < 0.000001:
+        raise NoData(sym)
     trend=detect_trend(df,i); df_d=None
     try:
         df_d=get_candles(sym,"1d",250,ttl=300,min_bars=100); df_d=add_indicators(df_d,100)
@@ -2175,25 +2284,25 @@ def analyze(sym):
         except Exception: btc_t=0
     ev=se.evaluate(ed,ed_d,ed_h,price=price,fut_score=fut_score,btc_trend=btc_t,patterns=patterns,
                    funding=funding,oi_change=oi_change,ls_ratio=ls_ratio,liq_data=liq_data)
-    # فلتر الساعة: لا LONG مع هبوط قوي H1 ولا SHORT مع صعود قوي H1.
-    mtf_unavailable = ed_h is None or len(ed_h) < 60
-    h1_state = se.trend_state(ed_h, len(ed_h)-1) if not mtf_unavailable else 0
-    prospective_side = ev.get("side") or cand
-    if not prospective_side and ed_d is not None:
-        prospective_side = _sgn_i(se.trend_state(ed_d, len(ed_d)-1))
-    if not prospective_side:
-        prospective_side = 1 if price >= float(ed["ema50"].iloc[-1]) else -1
-    hard_mtf_block = bool(prospective_side) and (
-        mtf_unavailable or
-        (prospective_side == 1 and h1_state == -2) or
-        (prospective_side == -1 and h1_state == 2)
-    )
-    if hard_mtf_block:
-        conflict = ("بيانات فريم الساعة غير كافية — تم إلغاء الإشارة احتياطياً" if mtf_unavailable
-                    else "تعارض قوي مع اتجاه الساعة — تم إلغاء الإشارة وانتظار التوافق")
-        ev["status"], ev["side"], ev["grade"], ev["lv"] = "WAIT", 0, "WAIT", None
-        ev.setdefault("wait_reasons", []).append(conflict)
     wait=(ev["status"]=="WAIT")
+    # ---- فلتر تعدد الأطر الزمنية الصارم (MTF)
+    # قبل قبول LONG على 4س: فريم الساعة يجب ألا يكون هابطاً قوياً (-2)
+    # قبل قبول SHORT: فريم الساعة يجب ألا يكون صاعداً قوياً (+2)
+    if not wait and ed_h is not None:
+        try:
+            h1_t = se.trend_state(ed_h, len(ed_h)-1)
+            if ev["side"] == 1 and h1_t == -2:
+                wait = True
+                ev = dict(ev)
+                ev["status"] = "WAIT"
+                ev.setdefault("wait_reasons", []).append("MTF: فريم الساعة هابط قوي (−2) — إلغاء LONG")
+            elif ev["side"] == -1 and h1_t == 2:
+                wait = True
+                ev = dict(ev)
+                ev["status"] = "WAIT"
+                ev.setdefault("wait_reasons", []).append("MTF: فريم الساعة صاعد قوي (+2) — إلغاء SHORT")
+        except Exception:
+            pass
     atr_now=float(ed["atr"].iloc[-1]) if not pd.isna(ed["atr"].iloc[-1]) else price*0.02
     forced=False
     if wait:
@@ -2210,10 +2319,7 @@ def analyze(sym):
                                   dict(se.CFG,max_sl_atr=4.0,min_rr_tp1=0.8))
         except Exception: lv=None
         if lv is None: lv=_hypo_levels(price,side,atr_now)
-        grade="C"
-        # أسباب WAIT العادية تعرض كفرصة مراقبة C وفق التصميم القديم؛
-        # أما تعارض H1 القوي فيبقى WAIT ولا يتحول إلى صفقة قسرية.
-        wait=bool(hard_mtf_block)
+        grade="C"; wait=False
     else:
         side=ev["side"]; grade=ev["grade"]; lv=ev["lv"]
     if lv is None: raise NoData(sym)
@@ -3240,7 +3346,17 @@ def caption_core(res,tier="free",lang="ar"):
             pat_names=" | ".join(f"{p['name']}{'[' + p.get('tf','').upper() + ']' if p.get('tf') else ''}" for p in pats[:2])
             lines.append(f"🕯 Pattern: {pat_names}")
         if grade in ("B","C"): lines+=["","👁 <b>Watch setup:</b> enter only after breakout/breakdown is confirmed"]
-        if res.get("forced"): lines+=["","⚠️ <b>Not a qualified setup (high risk):</b>"]+[f"  • {r}" for r in res.get("wait_reasons",[])[:3]]+["  💡 Use half your usual position size"]
+        if res.get("forced") or grade == "C":
+            lines += ["",
+                      "⚠️ <b>Grade C warning — low quality setup:</b>",
+                      "• Full engine conditions not met",
+                      "• Shown for analysis only (not auto-posted)",
+                      "• Use half normal risk size or less",
+                      "• Invalidate immediately if stop is broken"]
+            for r in res.get("wait_reasons", [])[:3]:
+                lines.append(f"  • {r}")
+            for w in res.get("warnings", [])[:2]:
+                lines.append(f"  ⚡ {w}")
         lines+=["","━━━━━━━━━━━━━━━━",f"🎯 <b>Expected Decision: {decision}</b>"]
         lines+=["",RISK_WARNING_EN,f"👤 {BRAND}"]
         return "\n".join(lines)
@@ -3266,7 +3382,17 @@ def caption_core(res,tier="free",lang="ar"):
         pat_names=" | ".join(f"{p['name']}{'[' + p.get('tf','').upper() + ']' if p.get('tf') else ''}" for p in pats[:2])
         lines.append(f"🕯 النموذج: {pat_names}")
     if grade in ("B","C"): lines+=["","👁 <b>صفقة مراقبة:</b> ادخل فقط بعد تأكيد الاختراق أو الكسر"]
-    if res.get("forced"): lines+=["","⚠️ <b>صفقة غير مؤهلة بمعايير الدقة (مخاطرة عالية):</b>"]+[f"  • {r}" for r in res.get("wait_reasons",[])[:3]]+["  💡 قلّل حجم الصفقة إلى نصف مخاطرتك المعتادة"]
+    if res.get("forced") or grade == "C":
+        lines += ["",
+                  "⚠️ <b>تحذير درجة C — صفقة منخفضة الجودة:</b>",
+                  "• الشروط الكاملة للمحرك غير متحققة",
+                  "• تُعرض للتحليل فقط وليست توصية نشر تلقائي",
+                  "• استخدم نصف حجم المخاطرة المعتاد أو أقل",
+                  "• راقب الإبطال فوراً إذا كسر الوقف"]
+        for r in res.get("wait_reasons", [])[:3]:
+            lines.append(f"  • {r}")
+        for w in res.get("warnings", [])[:2]:
+            lines.append(f"  ⚡ {w}")
     lines+=["","━━━━━━━━━━━━━━━━",f"🎯 <b>القرار المتوقع: {decision}</b>"]
     lines+=["",RISK_WARNING_AR,f"👤 {BRAND}"]
     return "\n".join(lines)
@@ -3362,6 +3488,7 @@ def keyboard_vip_menu():
         [_btn("💥 رادار الانفجارات",callback_data="vip_cmd:/explosions")],
         [_btn("🚀 عملات صاعدة",callback_data="vip_cmd:/pump")],
         [_btn("📉 رادار القيعان الذكي",callback_data="vip_cmd:/bottom")],
+        [_btn("🌱 فرص السبوت (1–2 شهر)",callback_data="vip_cmd:/spot")],
         [_btn("🔻 رادار فرص الشورت",callback_data="vip_cmd:/shortsradar")],
         [_btn("⭐ رادار Alpha الأسبوعي",callback_data="vip_cmd:/alpha")],
         [_btn("💧 رادار السيولة",callback_data="vip_cmd_args:liquidity")],
@@ -4583,6 +4710,61 @@ async def cmd_pump(update,ctx):
     await wait.edit_text("\n".join(lines),link_preview_options=NO_PREVIEW)
 
 @vip_only
+
+@vip_only
+
+async def cmd_plan(update,ctx):
+    """/plan dca|grid ... معلومات فقط — بدون تنفيذ."""
+    touch_user(update.effective_user,"/plan")
+    args = ctx.args or []
+    try:
+        mode = (args[0] if args else "").lower()
+        if mode not in ("dca","grid"):
+            msg = (
+                "📋 <b>خطط معلوماتية فقط (لا تنفيذ)</b>\n\n"
+                "DCA: <code>/plan dca سعر رأس_المال [شرائح] [نسبة_الخطوة]</code>\n"
+                "مثال: <code>/plan dca 0.05 500 3 5</code>\n\n"
+                "Grid: <code>/plan grid منتصف رأس_المال [عدد] [تباعد%]</code>\n"
+                "مثال: <code>/plan grid 65000 1000 6 1.5</code>\n\n"
+                "⚠️ البوت لا يرسل أوامر للبورصة."
+            )
+            await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+            return
+        if mode == "dca":
+            entry=float(args[1]); cap=float(args[2])
+            slices=int(args[3]) if len(args)>3 else 3
+            step=float(args[4]) if len(args)>4 else 4.0
+            pl=info_dca_plan(entry,cap,slices,step)
+            lines=["📥 <b>خطة DCA (معلومات فقط)</b>",f"رأس المال: ${pl['capital']}",f"متوسط دخول تقريبي: {pl['avg_entry']}",""]
+            for lv in pl["levels"]:
+                lines.append(f"• شريحة {lv['n']}: {lv['price']} ≈ ${lv['amount']} ({lv['qty']})")
+            lines+=["", "⚠️ لا تنفيذ تلقائي — للتنبيه والتخطيط اليدوي فقط."]
+            await update.message.reply_text("\n".join(lines),parse_mode=ParseMode.HTML)
+        else:
+            mid=float(args[1]); cap=float(args[2])
+            grids=int(args[3]) if len(args)>3 else 6
+            sp=float(args[4]) if len(args)>4 else 1.5
+            pl=info_grid_plan(mid,cap,grids,sp)
+            lines=["▦ <b>خطة Grid (معلومات فقط)</b>",f"المحور: {pl['mid']} | رأس المال: ${pl['capital']}",""]
+            for lv in pl["levels"]:
+                lines.append(f"• {lv['side']}: {lv['price']} ≈ ${lv['amount']}")
+            lines+=["", "⚠️ لا تنفيذ تلقائي — للمستويات على الشارت يدوياً."]
+            await update.message.reply_text("\n".join(lines),parse_mode=ParseMode.HTML)
+    except Exception:
+        await update.message.reply_text("صيغة غير صحيحة. مثال: /plan dca 0.05 500 3 5")
+
+async def cmd_spot(update,ctx):
+    wait=await update.message.reply_text("🌱 جارٍ مسح فرص السبوت (أفق 1–2 شهر)...")
+    try:
+        rows=await asyncio.to_thread(spot_opportunities,12)
+        lang=get_user_lang(update.effective_user.id)
+        txt=build_spot_text(rows,lang)
+        await wait.edit_text(txt[:4000],parse_mode=ParseMode.HTML,link_preview_options=NO_PREVIEW)
+    except Exception as e:
+        log.exception("cmd_spot")
+        try: await wait.edit_text(f"⚠️ {str(e)[:150]}")
+        except Exception: pass
+
 async def cmd_bottoms(update,ctx):
     wait=await update.message.reply_text("📉 رادار القيعان...")
     syms=await asyncio.to_thread(top_symbols,70); rows=[]
@@ -5281,7 +5463,7 @@ ADMIN_CMD_MAP={
     "/dashboard":cmd_dashboard,"/testchannels":cmd_testchannels,"/delist":cmd_delist,
     "/golden":cmd_golden,"/goldenconfig":cmd_goldenconfig,"/share":cmd_share,
     "/alpha_v2":cmd_alpha_radar_v2,"/patterns":cmd_patterns,"/neon":cmd_neon,
-    "/radar":cmd_radar}
+    "/radar":cmd_radar,"/spot":cmd_spot}
 
 ADMIN_ARGS_HINTS={
     "liquidity":"أرسل: /liquidity BTC","futures":"أرسل: /futures BTC",
@@ -5501,7 +5683,7 @@ async def cb_handler(update,ctx):
             handlers={"/predict":cmd_predict,"/whales":cmd_whales,"/explosions":cmd_explosions,
                 "/pump":cmd_pump,"/bottom":cmd_bottoms,"/shortsradar":cmd_shorts_radar,
                 "/alpha":cmd_alpha,"/active":cmd_active,"/golden":cmd_golden,"/daily":cmd_daily,
-                "/alpha_v2":cmd_alpha_radar_v2,"/radar":cmd_radar}
+                "/alpha_v2":cmd_alpha_radar_v2,"/radar":cmd_radar,"/spot":cmd_spot}
             fn=handlers.get(cmd)
             if fn: await fn(fake,ctx)
         except Exception as e:
@@ -5821,6 +6003,32 @@ PUBLIC_COMMANDS=[("start","ابدأ / Start"),("help","المساعدة / Help")
                  ("points","نقاطي / Points 🎯"),("myref","رابط الإحالة / Referral 🔗"),
                  ("fear","الخوف والطمع"),("market","حالة السوق"),("top","الأكثر ارتفاعاً"),("risk","حاسبة المخاطر")]
 
+
+def info_dca_plan(entry, capital=1000.0, slices=3, step_pct=4.0):
+    """خطة DCA معلوماتية فقط — لا تنفّذ أوامر."""
+    levels = []
+    per = capital / max(1, slices)
+    for i in range(slices):
+        px = entry * (1 - (i * step_pct / 100.0))
+        levels.append(dict(n=i+1, price=round(px, 8), amount=round(per, 2), qty=round(per/px, 6) if px>0 else 0))
+    avg = sum(x["price"]*x["amount"] for x in levels) / capital if capital else entry
+    return dict(levels=levels, avg_entry=round(avg, 8), capital=capital, note="معلومات فقط — لا تنفيذ تلقائي")
+
+
+def info_grid_plan(mid, capital=1000.0, grids=6, spacing_pct=1.5):
+    """خطة Grid معلوماتية فقط — مستويات للمراقبة اليدوية."""
+    half = grids // 2
+    levels = []
+    per = capital / max(1, grids)
+    for i in range(-half, half+1):
+        if i == 0 and grids % 2 == 0:
+            continue
+        px = mid * (1 + i * spacing_pct / 100.0)
+        side = "شراء" if i < 0 else ("بيع" if i > 0 else "محور")
+        levels.append(dict(side=side, price=round(px, 8), amount=round(per, 2)))
+    return dict(levels=levels[:grids], mid=mid, capital=capital, note="معلومات فقط — لا تنفيذ تلقائي")
+
+
 def get_crypto_news(symbol):
     try:
         url=f"https://min-api.cryptocompare.com/data/v2/news/?lang=EN&categories={symbol}"
@@ -5832,11 +6040,113 @@ def get_crypto_news(symbol):
 # ============ رادار الفرص المبكرة (وضع الظل) ============
 _radar_seen = {}
 
+
+def spot_opportunities(limit=12):
+    """فرص سبوط طويلة الأمد (شهر–شهرين) — معلومات وتنبيه فقط، بدون تنفيذ.
+    عملات رخيصة نسبياً تحت ضغط بيع مع بوادر استقرار + خطة تجميع hypothetical."""
+    out = []
+    try:
+        rows = binance_futures_all_tickers() or []
+    except Exception:
+        rows = []
+    cands = []
+    for x in rows:
+        try:
+            sym = x["symbol"]; price = float(x["price"]); vol = float(x["volume"])
+            if sym in STABLES or sym in EXCLUDE_TICKERS or sym in DAILY_EXCLUDE: continue
+            if price <= 0 or price > 5.0: continue
+            if vol < 1_000_000: continue
+            cands.append((vol, sym, price, float(x.get("change", 0))))
+        except Exception:
+            continue
+    cands.sort(reverse=True)
+    for _, sym, price, ch24 in cands[:100]:
+        if len(out) >= limit: break
+        try:
+            df = get_candles(sym, "1d", 120, ttl=600, min_bars=45)
+            if df is None or len(df) < 45: continue
+            df = add_indicators(df, 100)
+            last = df.iloc[-1]
+            if pd.isna(last.get("rsi")) or pd.isna(last.get("ema50")) or pd.isna(last.get("ema200")): continue
+            rsi = float(last["rsi"]); c = float(last["close"])
+            e50 = float(last["ema50"]); e200 = float(last["ema200"])
+            atr = float(last["atr"]) if not pd.isna(last.get("atr")) else c * 0.04
+            ch30 = (c / float(df["close"].iloc[-30]) - 1) * 100 if len(df) >= 30 else 0
+            ch7 = (c / float(df["close"].iloc[-7]) - 1) * 100 if len(df) >= 7 else 0
+            low60 = float(df["low"].tail(60).min())
+            dist_low = (c / low60 - 1) * 100 if low60 > 0 else 99
+            if ch30 > -8: continue
+            if rsi > 48: continue
+            if c > e50 * 1.12: continue
+            if dist_low > 25: continue  # بعيدة جداً عن قاع 60 يوم
+            eng = engine_direction(sym, c)
+            if eng == -1: continue
+            score = 0
+            reasons = []
+            if ch30 < -25: score += 2; reasons.append("هبوط 30ي حاد")
+            elif ch30 < -15: score += 1; reasons.append("هبوط 30ي متوسط")
+            if rsi < 32: score += 2; reasons.append("RSI منخفض جداً")
+            elif rsi < 40: score += 1; reasons.append("RSI منخفض")
+            if ch7 > -2: score += 1; reasons.append("استقرار أسبوعي")
+            if eng == 1: score += 1; reasons.append("محرك يدعم")
+            if c < e200: score += 1; reasons.append("تحت EMA200")
+            if dist_low < 8: score += 1; reasons.append("قرب قاع 60ي")
+            if score < 3: continue
+            # خطة تجميع معلوماتية فقط (DCA hypothetical) — لا تنفيذ
+            buy1 = round(c, 8)
+            buy2 = round(max(c - 1.2 * atr, low60), 8)
+            buy3 = round(max(c - 2.2 * atr, low60 * 0.98), 8)
+            invalid = round(low60 * 0.96, 8)
+            target1 = round(c + 2.0 * atr, 8)
+            target2 = round(max(e50, c + 3.5 * atr), 8)
+            out.append(dict(
+                sym=sym, price=c, ch24=round(ch24,1), ch7=round(ch7,1), ch30=round(ch30,1),
+                rsi=round(rsi,1), score=score, side=1, horizon="1–2 شهر",
+                note="معلومات/تنبيه فقط — لا تنفيذ تلقائي", engine_aligned=(eng==1),
+                reasons=reasons, low60=low60, dist_low=round(dist_low,1),
+                plan=dict(buy1=buy1, buy2=buy2, buy3=buy3, invalid=invalid,
+                          tp1=target1, tp2=target2, atr=round(atr, 8))
+            ))
+        except Exception:
+            continue
+    out.sort(key=lambda x: -x["score"])
+    return out[:limit]
+
+
+def build_spot_text(rows, lang="ar"):
+    if not rows:
+        return "🌱 لا توجد فرص سبوت مؤهلة حالياً." if lang != "en" else "🌱 No qualifying spot setups now."
+    lines = [
+        "🌱 <b>فرص السبوت (أفق 1–2 شهر)</b>",
+        "📋 تنبيه ومعلومات فقط — البوت لا ينفّذ أي صفقة.",
+        "تجميع حذر محتمل بعد هبوط، مع خطة مستويات للمراقبة.",
+        "━━━━━━━━━━━━━━━━",
+        ""
+    ]
+    for r in rows[:10]:
+        plan = r.get("plan") or {}
+        lines.append(f"• <b>#{r['sym']}</b> · ${r['price']:.6g} · نقاط {r['score']}")
+        lines.append(f"  30ي {r['ch30']:+.1f}% | 7ي {r['ch7']:+.1f}% | RSI {r['rsi']} | قرب القاع {r.get('dist_low', '—')}%")
+        if r.get("reasons"):
+            lines.append(f"  ✓ {' · '.join(r['reasons'][:4])}")
+        if plan:
+            lines.append(f"  📥 تجميع مقترح: {plan.get('buy1')} / {plan.get('buy2')} / {plan.get('buy3')}")
+            lines.append(f"  🎯 أهداف مراقبة: {plan.get('tp1')} → {plan.get('tp2')}")
+            lines.append(f"  🛑 إبطال الفكرة: {plan.get('invalid')}")
+        lines.append(f"  <i>{r.get('note','')}</i>")
+        lines.append("")
+    lines += [
+        "⚠️ ليست نصيحة مالية ولا أمر شراء.",
+        "البوت للتنبيه والتحليل فقط — التنفيذ قرارك اليدوي.",
+        RISK_WARNING_AR
+    ]
+    return chr(10).join(lines)
+
+
 def radar_scan(symbols):
     """رادار الفرص المبكرة (فريم 15د — فيوتشر).
-    يلتقط تحركاً قوياً + حجم استثنائي قبل أن ينفجر الـ24س.
-    شروط LONG: صعود ≥4% خلال شمعتين، حجم ≥2.5×، إغلاق فوق أعلى 20، تغير 24س <12%.
-    شروط SHORT: هبوط ≥4% خلال شمعتين، حجم ≥2.5×، إغلاق تحت أدنى 20، تغير 24س >-12%.
+    يلتقط تحركاً قوياً + حجم استثنائي.
+    توافق إلزامي مع اتجاه 4س والمحرك: لا يُنشر SHORT إذا المحرك LONG والعكس.
     مدة الصفقة قصيرة (يوم تداول)."""
     out = []
     for s in symbols:
@@ -5855,7 +6165,7 @@ def radar_scan(symbols):
             if ch24 is None: continue
             atr = float(d["atr"].iloc[last])
             price = float(c.iloc[last])
-            if not (atr > 0 and price > 0): continue
+            if not (atr > 0 and price > 0) or price < 0.000001: continue
             try:
                 df_4h = get_candles(s, "4h", 100, ttl=300, min_bars=50)
                 df_4h = add_indicators(df_4h, 100)
@@ -5863,26 +6173,37 @@ def radar_scan(symbols):
             except Exception:
                 trend_4h = "range"
             side = 0
+            # زخم 15د + توافق صارم مع 4س (لا range معاكس)
             if move >= 0.04 and float(c.iloc[last]) >= float(h.iloc[last - 20:last].max()) and ch24 < 12:
-                if trend_4h in ("strong_up", "up", "range"):
+                if trend_4h in ("strong_up", "up"):
                     side = 1
             elif move <= -0.04 and float(c.iloc[last]) <= float(l.iloc[last - 20:last].min()) and ch24 > -12:
-                if trend_4h in ("strong_down", "down", "range"):
+                if trend_4h in ("strong_down", "down"):
                     side = -1
             if side == 0: continue
+            # توافق مع المحرك الرئيسي: إن تعارض → لا تنشر كفرصة تداول
+            eng = engine_direction(s, price)
+            if eng != 0 and eng != side:
+                continue  # تناقض مع التحليل — تجاهل
+            # وقف ≤ 3%
             risk = max(1.5 * atr, price * 0.008)
-            risk = min(risk, 2.8 * atr)
+            risk = min(risk, 2.8 * atr, price * 0.03)
             sl = price - side * risk
+            if abs(price - sl) / price > 0.03:
+                sl = price * (1 - side * 0.03)
+                risk = abs(price - sl)
             tps = []
             for mult, frac in ((1.2, 0.50), (2.0, 0.30), (3.0, 0.20)):
                 px = price + side * risk * mult
                 tps.append(dict(px=float(px), pct=round(100 * side * (px - price) / price, 2),
                                 frac=frac, hit=False, src="radar"))
             lv = dict(entry=price, sl=float(sl), risk=float(risk), atr=atr, tps=tps)
+            grade = "B" if eng == side else "R"
             out.append(dict(sym=s, tf="15m", side=side, lv=lv, bar_t=int(d["t"].iloc[last]),
-                            grade="R", setup="RADAR", source="binance_fut", rank=1, ok=1,
+                            grade=grade, setup="RADAR", source="binance_fut", rank=1 if eng == side else 0, ok=1,
                             move=round(move * 100, 2), vol_ratio=round(vol_ratio, 1),
-                            ch24=round(ch24, 2), price=price, forced=False, wait=False))
+                            ch24=round(ch24, 2), price=price, forced=False, wait=False,
+                            engine_aligned=(eng == side)))
         except Exception:
             continue
     return out
@@ -5965,7 +6286,7 @@ async def post_init(app):
         asyncio.create_task(morning_brief_loop(app)),
         asyncio.create_task(shadow_loop(app))]
     log.info("version %s",BOT_VERSION)
-    log.info("ryma FINAL (engine+always-trade) | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$500000 | SL≤2.5%% | RR≥1.5 | hype=admin | neon=admin | patterns_chart=admin",
+    log.info("ryma FINAL (engine+always-trade) | max_open=%d | golden=%ds | min_score=%d | multi=%s | points=%d→VIP%d | patterns=MTF | bilingual=auto | whale_min=$500000 | SL≤3%% hard | RR≥1.5 | min_score=8.5 | MTF strict | hype=admin | neon=admin | patterns_chart=admin",
              MAX_OPEN,CYCLE_GOLDEN,get_golden_config().get("min_score",1),is_multi_exchange(),
              VIP_THRESHOLD,VIP_REWARD_DAYS)
 
@@ -5995,7 +6316,7 @@ def main():
         ("golden",cmd_golden),("goldenconfig",cmd_goldenconfig),("share",cmd_share),
         ("portfolio",cmd_portfolio),("alpha_v2",cmd_alpha_radar_v2),
         ("patterns",cmd_patterns),("neon",cmd_neon),
-        ("points",cmd_points),("myref",cmd_myref),("addpoints",cmd_addpoints),("radar",cmd_radar),
+        ("points",cmd_points),("myref",cmd_myref),("addpoints",cmd_addpoints),("radar",cmd_radar),("spot",cmd_spot),("plan",cmd_plan),
         ("btdiag",cmd_btdiag),("exportdata",cmd_exportdata),("fear",cmd_fear),("market",cmd_market),("top",cmd_top),("tools",cmd_tools),("risk",cmd_riskcalc)]
     for name,fn in handlers: app.add_handler(CommandHandler(name,fn))
     app.add_handler(TypeHandler(Update,log_updates),group=-1)
