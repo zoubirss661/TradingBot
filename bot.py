@@ -9,7 +9,7 @@ import types as _types
 ENG_TP_FRACS = [0.50, 0.25, 0.15, 0.10]
 
 ENG_CFG = dict(
-    min_score=6.5,        # أقل نتيجة لقبول الصفقة (B) — مخفّف ليوم التداول
+    min_score=8.5,        # حد جودة مرتفع لتقليل الإشارات الضعيفة
     grade_a=8.5,
     grade_aplus=10.5,
     min_adx=20.0,         # أقل من هذا = سوق عرضي
@@ -42,7 +42,7 @@ def eng_prepare(df):
     """يحسب كل المؤشرات من الصفر (سببية: لا تنظر للمستقبل)."""
     df = df.copy().reset_index(drop=True)
     c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
-    for n in (20, 50, 200):
+    for n in (20, 21, 50, 55, 200):
         df[f"ema{n}"] = c.ewm(span=n, adjust=False, min_periods=n).mean()
     pc = c.shift()
     tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
@@ -157,6 +157,10 @@ def eng_build_levels(df, i, side, price, atr, htf=None, htf_i=None, cfg=ENG_CFG)
     if dist > price * max_risk_pct:
         dist = price * max_risk_pct
         sl = price - side * dist
+    # قص الوقف هنا أيضاً حتى تُبنى الأهداف على مخاطرة لا تتجاوز 3%.
+    if abs(price - sl) / price > 0.03:
+        sl = price * (1 - side * 0.03)
+        dist = abs(price - sl)
     risk = dist
 
     # ---- مستويات الأهداف (قمم/قيعان 4س + يومي)
@@ -237,6 +241,9 @@ def eng_build_levels(df, i, side, price, atr, htf=None, htf_i=None, cfg=ENG_CFG)
         sl = min(sl, price * (1 + max_risk_pct))  # سقف وقف الشورت
     else:
         sl = max(sl, price * (1 - max_risk_pct))
+    # حد أمان نهائي وصارم: لا يتجاوز وقف الخسارة 3% من سعر الدخول.
+    if abs(price - sl) / price > 0.03:
+        sl = price * (1 - side * 0.03)
     risk = abs(price - sl)
     if risk <= 0:
         return None, "مخاطرة غير صالحة"
@@ -311,6 +318,14 @@ def eng_evaluate(df, htf=None, ltf=None, price=None, i=None, htf_i=None, ltf_i=N
     score = 0.0
     why = res["reasons"]
     score += abs(htf_t) if htf is not None else 1.0
+
+    # EMA21/EMA55: مكافأة عندما يكون ترتيب المتوسطات متوافقاً مع اتجاه الصفقة.
+    ema21 = float(df["ema21"].iat[i]) if "ema21" in df and not np.isnan(df["ema21"].iat[i]) else np.nan
+    ema55 = float(df["ema55"].iat[i]) if "ema55" in df and not np.isnan(df["ema55"].iat[i]) else np.nan
+    if np.isfinite(ema21) and np.isfinite(ema55):
+        if (side == 1 and ema21 > ema55) or (side == -1 and ema21 < ema55):
+            score += 2.0
+            why.append("تقاطع/ترتيب EMA21 وEMA55 يدعم الاتجاه على 4س")
     score += abs(etf)
     why.append("اتجاه يومي %s / 4س %s" % ("متوافق" if htf_t * side > 0 else "محايد",
                                           "قوي" if abs(etf) == 2 else "متوافق"))
@@ -344,19 +359,19 @@ def eng_evaluate(df, htf=None, ltf=None, price=None, i=None, htf_i=None, ltf_i=N
         score += 0.3
 
     rv = float(df["rvol"].iat[i]) if not np.isnan(df["rvol"].iat[i]) else 1.0
-    if rv >= 1.2:
+    if rv > 1.5:
         score += 1.0
-        why.append("حجم أعلى من المتوسط ×%.1f" % rv)
+        why.append("حجم تداول قوي (RVOL ×%.1f)" % rv)
     elif rv >= 0.9:
         score += 0.3
     elif rv < 0.7:
         score -= 1.0
         res["warnings"].append("حجم ضعيف ×%.1f" % rv)
 
-    if -1.0 <= ext <= 1.5:
+    if abs(price - ema20) < 1.5 * atr:
         score += 1.0
-        why.append("دخول قريب من المتوسط (ليس مطاردة)")
-    elif ext < -1.0:
+        why.append("السعر قريب من EMA20 ضمن 1.5 ATR")
+    elif ext < -1.5:
         score -= 0.5
 
     score += max(-1.5, min(1.5, 0.5 * fut_score))
@@ -365,15 +380,20 @@ def eng_evaluate(df, htf=None, ltf=None, price=None, i=None, htf_i=None, ltf_i=N
     elif fut_score <= -2:
         res["warnings"].append("بيانات الفيوتشر ضد الاتجاه")
 
+    pattern_support = False
     if patterns:
         for p in patterns:
             b = p.get("bias")
             if (b == "bullish" and side == 1) or (b == "bearish" and side == -1):
                 score += 1.0
+                pattern_support = True
                 why.append("نموذج %s يدعم الصفقة" % p.get("name", ""))
             elif b in ("bullish", "bearish"):
                 score -= 1.5
                 res["warnings"].append("نموذج %s عكس الصفقة" % p.get("name", ""))
+    # نقاط جودة الإعداد (Quality Score) مستقلة وواضحة.
+    if pattern_support:
+        why.append("تأكيد جودة: نموذج فني يدعم الاتجاه")
     if btc_trend * side < 0:
         score -= 1.0
         res["warnings"].append("البيتكوين عكس اتجاه الصفقة")
@@ -416,8 +436,10 @@ def eng_evaluate(df, htf=None, ltf=None, price=None, i=None, htf_i=None, ltf_i=N
 
 
 # ----------------------------------------------------------------- محاكاة / Backtest
-def eng_simulate(df_raw, htf_raw=None, start=260, cfg=None, fee=0.0008, slip=0.0005, btc_trend=0, prepared=None):
-    """Backtest مشي-للأمام: كل قرار يستخدم بيانات حتى الشمعة i فقط (لا تجسس على المستقبل)."""
+def eng_simulate(df_raw, htf_raw=None, start=260, cfg=None, fee=0.0008, slip=0.0005,
+                 btc_trend=0, prepared=None, capital=1000.0,
+                 funding_rate=0.0001, funding_interval_hours=8.0):
+    """Backtest سببي مع مخاطرة نقدية ثابتة 1% ورسوم تمويل تقديرية."""
     cfg = cfg or ENG_CFG
     if prepared is not None:
         d, htf = prepared
@@ -443,6 +465,7 @@ def eng_simulate(df_raw, htf_raw=None, start=260, cfg=None, fee=0.0008, slip=0.0
         kind, j = "TIME", i + 1
         while j < n:
             h, l = H[j], L[j]
+            # قاعدة محافظة للشمعة التي تلمس SL وTP معاً: نعتمد SL أولاً.
             if (s == 1 and l <= sl) or (s == -1 and h >= sl):
                 realized += remaining * s * (sl - fill) / risk
                 kind = "TRAIL" if trail else ("BE" if be else "SL")
@@ -477,12 +500,25 @@ def eng_simulate(df_raw, htf_raw=None, start=260, cfg=None, fee=0.0008, slip=0.0
         if remaining > 1e-9:
             jj = min(j, n - 1)
             realized += remaining * s * (C[jj] - fill) / risk
-        position_size = 1.0
-        cost = 2 * (fee + slip) * fill * position_size / risk
+        # مخاطرة نقدية ثابتة: 1% من رأس المال لكل صفقة.
+        capital = max(0.0, float(capital))
+        risk_cash = capital * 0.01
+        position_size = (risk_cash / risk) if risk > 0 else 0.0  # كمية الأصل
+        position_value = position_size * fill
+        # الرسوم والانزلاق بوحدة R؛ مكافئان لخصمهما من قيمة الصفقة الفعلية.
+        cost = 2 * (fee + slip) * fill / risk
+        bars_held = max(1, min(j, n - 1) - i)
+        held_hours = (bars_held * tfms) / 3_600_000
+        funding_periods = held_hours / max(float(funding_interval_hours), 1e-9)
+        funding_cost_r = max(0.0, s * float(funding_rate)) * funding_periods * fill / risk
+        total_cost = cost + funding_cost_r
         _adx = d["adx"].iat[i]
-        trades.append(dict(t=int(t_arr[i]), side=s, grade=ev["grade"], R=round(realized - cost, 3),
-                           exit=kind, bars=min(j, n - 1) - i, tps=sum(t["hit"] for t in tps),
-                           cost=round(float(cost), 4), score=ev["score"],
+        trades.append(dict(t=int(t_arr[i]), side=s, grade=ev["grade"], R=round(realized - total_cost, 3),
+                           exit=kind, bars=bars_held, tps=sum(t["hit"] for t in tps),
+                           cost=round(float(cost), 4), funding_cost=round(float(funding_cost_r), 4),
+                           risk_cash=round(float(risk_cash), 4), position_size=round(float(position_size), 8),
+                           position_value=round(float(position_value), 4),
+                           pnl_cash=round(float((realized - total_cost) * risk_cash), 4), score=ev["score"],
                            adx=float(_adx) if _adx == _adx else 0.0,
                            sl_atr=round(risk / lv["atr"], 2), rr1=ev["rr"][0]))
         i = min(j, n - 1) + 1
@@ -2091,6 +2127,8 @@ def analyze(sym):
         long_ok=detect_core_conditions(df,i,1); short_ok=detect_core_conditions(df,i,-1)
         strategy="Core"
     price,_=live_price(sym); price=float(price or df["close"].iloc[-1])
+    if not np.isfinite(price) or price < 0.000001:
+        raise NoData(f"{sym}: السعر أقل من الحد الأدنى الآمن 0.000001")
     trend=detect_trend(df,i); df_d=None
     try:
         df_d=get_candles(sym,"1d",250,ttl=300,min_bars=100); df_d=add_indicators(df_d,100)
@@ -2137,6 +2175,24 @@ def analyze(sym):
         except Exception: btc_t=0
     ev=se.evaluate(ed,ed_d,ed_h,price=price,fut_score=fut_score,btc_trend=btc_t,patterns=patterns,
                    funding=funding,oi_change=oi_change,ls_ratio=ls_ratio,liq_data=liq_data)
+    # فلتر الساعة: لا LONG مع هبوط قوي H1 ولا SHORT مع صعود قوي H1.
+    mtf_unavailable = ed_h is None or len(ed_h) < 60
+    h1_state = se.trend_state(ed_h, len(ed_h)-1) if not mtf_unavailable else 0
+    prospective_side = ev.get("side") or cand
+    if not prospective_side and ed_d is not None:
+        prospective_side = _sgn_i(se.trend_state(ed_d, len(ed_d)-1))
+    if not prospective_side:
+        prospective_side = 1 if price >= float(ed["ema50"].iloc[-1]) else -1
+    hard_mtf_block = bool(prospective_side) and (
+        mtf_unavailable or
+        (prospective_side == 1 and h1_state == -2) or
+        (prospective_side == -1 and h1_state == 2)
+    )
+    if hard_mtf_block:
+        conflict = ("بيانات فريم الساعة غير كافية — تم إلغاء الإشارة احتياطياً" if mtf_unavailable
+                    else "تعارض قوي مع اتجاه الساعة — تم إلغاء الإشارة وانتظار التوافق")
+        ev["status"], ev["side"], ev["grade"], ev["lv"] = "WAIT", 0, "WAIT", None
+        ev.setdefault("wait_reasons", []).append(conflict)
     wait=(ev["status"]=="WAIT")
     atr_now=float(ed["atr"].iloc[-1]) if not pd.isna(ed["atr"].iloc[-1]) else price*0.02
     forced=False
@@ -2154,7 +2210,10 @@ def analyze(sym):
                                   dict(se.CFG,max_sl_atr=4.0,min_rr_tp1=0.8))
         except Exception: lv=None
         if lv is None: lv=_hypo_levels(price,side,atr_now)
-        grade="C"; wait=False
+        grade="C"
+        # أسباب WAIT العادية تعرض كفرصة مراقبة C وفق التصميم القديم؛
+        # أما تعارض H1 القوي فيبقى WAIT ولا يتحول إلى صفقة قسرية.
+        wait=bool(hard_mtf_block)
     else:
         side=ev["side"]; grade=ev["grade"]; lv=ev["lv"]
     if lv is None: raise NoData(sym)
