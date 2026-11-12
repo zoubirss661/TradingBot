@@ -490,7 +490,15 @@ def eng_simulate(df_raw, htf_raw=None, start=260, cfg=None, fee=0.0008, slip=0.0
         return []
     if htf is None or not isinstance(htf, pd.DataFrame):
         htf = pd.DataFrame()
-    if len(d) < 2:
+    required = {"t", "open", "high", "low", "close", "volume", "atr", "adx"}
+    if not required.issubset(d.columns):
+        log.warning("backtest: prepared candles missing columns: %s", sorted(required - set(d.columns)))
+        return []
+    # n was previously missing here; that caused NameError for every symbol.
+    n = len(d)
+    start = max(0, int(start))
+    if n <= max(60, start + 1):
+        log.warning("backtest: insufficient candles for simulation (n=%s, start=%s)", n, start)
         return []
     diffs = np.diff(d["t"].to_numpy(dtype="int64")[-200:])
     diffs = diffs[diffs > 0]
@@ -498,8 +506,10 @@ def eng_simulate(df_raw, htf_raw=None, start=260, cfg=None, fee=0.0008, slip=0.0
         log.warning("backtest: invalid candle timestamps")
         return []
     tfms = int(np.median(diffs))
-    htf_close = htf["t"].to_numpy() + 86_400_000
-    t_arr = d["t"].to_numpy()
+    # The daily timeframe can be empty for short/partial histories; never index a missing `t`.
+    htf_close = (htf["t"].to_numpy(dtype="int64") + 86_400_000
+                 if "t" in htf.columns else np.array([], dtype="int64"))
+    t_arr = d["t"].to_numpy(dtype="int64")
     O, H, L, C, A = (d[k].to_numpy() for k in ("open", "high", "low", "close", "atr"))
     trades, i = [], start
     while i < n - 1:
@@ -4323,22 +4333,38 @@ def bt_report(per,tmin,tmax,label,errors=None):
             lines.append(f"• {sym}: {str(err)[:110]}")
     return "\n".join(lines), ""
 
-def backtest_many(symbols,years):
-    per,tmin,tmax,errors={},None,None,{}
-    symbols = list(dict.fromkeys(s for s in (symbols or []) if isinstance(s, str) and s.strip()))
-    for s in symbols:
+def backtest_many(symbols, years, max_workers=4):
+    """تحميل/اختبار العملات بالتوازي المحدود لتقليل وقت TOP50 مع حفظ أخطاء كل عملة."""
+    per, tmin, tmax, errors = {}, None, None, {}
+    symbols = list(dict.fromkeys(s.strip().upper() for s in (symbols or [])
+                                 if isinstance(s, str) and s.strip()))
+    if not symbols:
+        return per, tmin, tmax, errors
+
+    def _one(sym):
         try:
-            trs,a,b = backtest_symbol(s,years)
+            trs, a, b = backtest_symbol(sym, years)
             if a is None or b is None:
-                errors[s] = "لا توجد فترة بيانات صالحة"
-                continue
-            per[s] = trs if isinstance(trs, list) else []
-            tmin = a if tmin is None else min(tmin,a)
-            tmax = b if tmax is None else max(tmax,b)
+                return sym, None, "لا توجد فترة بيانات صالحة"
+            if not isinstance(trs, list):
+                return sym, None, "محرك الاختبار لم يُرجع قائمة صفقات صالحة"
+            return sym, (trs, int(a), int(b)), None
         except Exception as ex:
-            errors[s] = f"{type(ex).__name__}: {ex}"
-            log.exception("backtest_symbol failed for %s", s)
-    return per,tmin,tmax,errors
+            log.exception("backtest_symbol failed for %s", sym)
+            return sym, None, f"{type(ex).__name__}: {ex}"
+
+    workers = max(1, min(int(max_workers or 1), 4, len(symbols)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        # executor.map يحافظ على ترتيب الرموز، بينما ينفذ الطلبات بالتوازي.
+        for sym, result, error in pool.map(_one, symbols):
+            if error:
+                errors[sym] = error
+                continue
+            trs, a, b = result
+            per[sym] = trs
+            tmin = a if tmin is None else min(tmin, a)
+            tmax = b if tmax is None else max(tmax, b)
+    return per, tmin, tmax, errors
 
 def admin_only(fn):
     @functools.wraps(fn)
@@ -5109,6 +5135,7 @@ async def cmd_bt(update,ctx):
     try: years=float(ctx.args[1]) if len(ctx.args)>1 else 3.0
     except ValueError: years=3.0
     syms=COINS if arg in ("ALL","") else [clean_symbol(arg)]
+    syms=[x for x in (syms or []) if x]
     wait=await update.message.reply_text("⏳ Backtest...")
     per,a,b,errors=await asyncio.to_thread(backtest_many,syms,years)
     if not per:
@@ -5236,6 +5263,7 @@ async def cmd_btdiag(update,ctx):
     try:
         wait=await update.message.reply_text(f"⏳ تشخيص {BOT_VERSION}: جلب بيانات Top 50 ({years:g} سنة)... قد يأخذ عدة دقائق")
         syms=await asyncio.to_thread(top_symbols,50)
+        syms=syms if isinstance(syms, (list, tuple)) else []
         data=await asyncio.to_thread(bt_prepare_all,syms,years)
         if not data: await wait.edit_text("❌ لا توجد بيانات"); return
         await wait.edit_text(f"⏳ تشغيل الباك تست على {len(data)} عملة...")
@@ -5418,6 +5446,7 @@ async def cmd_bt50(update,ctx):
     except ValueError: years=3.0
     wait=await update.message.reply_text("⏳ Top 50...")
     syms=await asyncio.to_thread(top_symbols,50)
+    syms=syms if isinstance(syms, (list, tuple)) else []
     per,a,b,errors=await asyncio.to_thread(backtest_many,syms,years)
     if not per:
         text,_=bt_report(per,a,b,"TOP50",errors)
