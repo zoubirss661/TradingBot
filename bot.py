@@ -474,12 +474,30 @@ def eng_simulate(df_raw, htf_raw=None, start=260, cfg=None, fee=0.0008, slip=0.0
     """Backtest مشي-للأمام: كل قرار يستخدم بيانات حتى الشمعة i فقط (لا تجسس على المستقبل)."""
     cfg = cfg or ENG_CFG
     if prepared is not None:
+        if not isinstance(prepared, (tuple, list)) or len(prepared) != 2:
+            log.warning("backtest: prepared data must be (ltf, htf)")
+            return []
         d, htf = prepared
     else:
+        if df_raw is None or not isinstance(df_raw, pd.DataFrame) or df_raw.empty:
+            log.warning("backtest: missing/empty raw candle dataframe")
+            return []
         d = eng_prepare(df_raw)
-        htf = eng_prepare(htf_raw if htf_raw is not None else eng_resample_daily(df_raw))
-    n = len(d)
-    tfms = int(np.median(np.diff(d["t"].to_numpy()[-200:])))
+        daily_raw = htf_raw if htf_raw is not None else eng_resample_daily(df_raw)
+        htf = eng_prepare(daily_raw) if isinstance(daily_raw, pd.DataFrame) and not daily_raw.empty else pd.DataFrame()
+    if d is None or not isinstance(d, pd.DataFrame) or d.empty or len(d) <= max(60, int(start)):
+        log.warning("backtest: insufficient prepared candles (got %s)", 0 if d is None else len(d))
+        return []
+    if htf is None or not isinstance(htf, pd.DataFrame):
+        htf = pd.DataFrame()
+    if len(d) < 2:
+        return []
+    diffs = np.diff(d["t"].to_numpy(dtype="int64")[-200:])
+    diffs = diffs[diffs > 0]
+    if diffs.size == 0:
+        log.warning("backtest: invalid candle timestamps")
+        return []
+    tfms = int(np.median(diffs))
     htf_close = htf["t"].to_numpy() + 86_400_000
     t_arr = d["t"].to_numpy()
     O, H, L, C, A = (d[k].to_numpy() for k in ("open", "high", "low", "close", "atr"))
@@ -540,7 +558,8 @@ def eng_simulate(df_raw, htf_raw=None, start=260, cfg=None, fee=0.0008, slip=0.0
         bars_held = max(1, min(j, n - 1) - i)
         # tfms تقريباً 4h → كل شمعة ≈ 0.5 فترة تمويل (8h)
         funding_periods = bars_held * (tfms / 28_800_000.0)  # 8h = 28800000 ms
-        funding_est = abs(0.0001 * funding_periods)  # 0.01% لكل فترة تمويل (محافظة)
+        # التمويل يُحوّل إلى R مثل الرسوم: نسبة التمويل × قيمة المركز / المخاطرة.
+        funding_est = abs(0.0001 * funding_periods * fill * position_size / risk)
         cost = trade_cost + funding_est
         _adx = d["adx"].iat[i]
         trades.append(dict(t=int(t_arr[i]), side=s, grade=ev["grade"], R=round(realized - cost, 3),
@@ -4234,16 +4253,33 @@ def binance_futures_klines_long(sym, tf, bars):
     return out[-bars:] if out else None
 
 def backtest_symbol(sym, years=3.0):
-    need = int(years*6*365)+300
+    """يرجع (الصفقات، بداية فترة التقييم، نهايتها). لا يفترض أن مصدر البيانات نجح."""
+    try:
+        years = float(years)
+    except (TypeError, ValueError):
+        years = 3.0
+    if not np.isfinite(years) or years <= 0:
+        raise ValueError("مدة الباك تست يجب أن تكون أكبر من صفر")
+    years = min(years, 10.0)
+    need = int(years * 6 * 365) + 300
     rows = binance_futures_klines_long(sym, "4h", need)
     if rows and len(rows) >= 400:
         df = _rows_to_df(rows, "4h", need)
     else:
         df = get_candles(sym, "4h", need, ttl=900)
-    if len(df) < 400: return [], int(df["t"].iloc[0]), int(df["t"].iloc[-1])
-    raw = df[["t","open","high","low","close","volume"]]
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        raise NoData(f"{sym}: لم تُرجع مصادر البيانات شموعاً")
+    if not {"t", "open", "high", "low", "close", "volume"}.issubset(df.columns):
+        raise ValueError(f"{sym}: أعمدة الشموع غير مكتملة")
+    df = df.dropna(subset=["t", "open", "high", "low", "close", "volume"]).copy()
+    if len(df) < 400:
+        if len(df) >= 2:
+            return [], int(df["t"].iloc[0]), int(df["t"].iloc[-1])
+        raise NoData(f"{sym}: شموع غير كافية ({len(df)}/400)")
+    raw = df[["t", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
     trs = se.simulate(raw, None, start=260)
-    for x in trs: x.update(coin=sym, setup="Engine")
+    for x in trs:
+        x.update(coin=sym, setup="Engine")
     return trs, int(df["t"].iloc[260]), int(df["t"].iloc[-1])
 
 def metrics(trs):
@@ -4255,27 +4291,54 @@ def metrics(trs):
                 dd=round(float((np.maximum.accumulate(eq)-eq).max()),1),
                 tp1=round(100*float(np.mean([x.get("tps",0)>=1 for x in srt])),1))
 
-def bt_report(per,tmin,tmax,label):
-    allt=[x for tr in per.values() for x in tr]
-    cut=tmin+0.65*(tmax-tmin)
-    tr=[x for x in allt if x["t"]<cut]; te=[x for x in allt if x["t"]>=cut]
-    mt,me=metrics(tr),metrics(te)
-    lines=[f"📊 Backtest {label} ({len(per)} عملة) · {BOT_VERSION}","",
-        f"📈 TRAIN: n={mt['n']} | WR {mt['wr']}% | PF {mt['pf']} | {mt['total']:+}R",
-        f"📊 TEST : n={me['n']} | WR {me['wr']}% | PF {me['pf']} | {me['total']:+}R",
-        f"🎯 وصول TP1: {me['tp1']}%",""]
-    v="🔴 ضعيف" if me["pf"]<1.1 else ("🟡 مقبول" if me["pf"]<1.5 else ("✅ جيد" if me["pf"]<1.8 else "🏆 ممتاز"))
-    lines.append(f"الحكم: {v}")
-    return "\n".join(lines),""
+def bt_report(per,tmin,tmax,label,errors=None):
+    errors = errors or {}
+    allt = [x for tr in (per or {}).values() if isinstance(tr, list) for x in tr
+            if isinstance(x, dict) and isinstance(x.get("t"), (int, float)) and isinstance(x.get("R"), (int, float))]
+    valid_range = (isinstance(tmin, (int, float)) and isinstance(tmax, (int, float)) and tmax > tmin)
+    lines = [f"📊 Backtest {label} ({len(per or {})} عملة صالحة) · {BOT_VERSION}",
+             f"📥 العملات التي فشل تحميلها/اختبارها: {len(errors)}"]
+    if not valid_range:
+        lines += ["", "⚠️ لا توجد فترة زمنية صالحة لتقسيم TRAIN وTEST.",
+                  "لم يتم حساب نسب نجاح أو ربح وهمية."]
+    elif not allt:
+        lines += ["", "⚠️ تم تحميل البيانات لكن لم ينتج محرك الاختبار أي صفقة.",
+                  "لا يمكن الحكم على الاستراتيجية من عينة بلا صفقات."]
+    else:
+        cut = tmin + 0.65 * (tmax - tmin)
+        tr = [x for x in allt if x["t"] < cut]
+        te = [x for x in allt if x["t"] >= cut]
+        mt, me = metrics(tr), metrics(te)
+        lines += ["", f"📈 TRAIN: n={mt['n']} | WR {mt['wr']}% | PF {mt['pf']} | {mt['total']:+}R",
+                  f"📊 TEST : n={me['n']} | WR {me['wr']}% | PF {me['pf']} | {me['total']:+}R",
+                  f"🎯 وصول TP1: {me['tp1']}%", ""]
+        if me["n"] < 30:
+            verdict = "⚪ عينة الاختبار صغيرة — لا يعتمد عليها للحكم"
+        else:
+            verdict = "🔴 ضعيف" if me["pf"] < 1.1 else ("🟡 مقبول" if me["pf"] < 1.5 else ("✅ جيد" if me["pf"] < 1.8 else "🏆 ممتاز"))
+        lines.append(f"الحكم: {verdict}")
+    if errors:
+        lines += ["", "⚠️ أمثلة على أسباب فشل العملات:"]
+        for sym, err in list(errors.items())[:5]:
+            lines.append(f"• {sym}: {str(err)[:110]}")
+    return "\n".join(lines), ""
 
 def backtest_many(symbols,years):
-    per,tmin,tmax={},None,None
+    per,tmin,tmax,errors={},None,None,{}
+    symbols = list(dict.fromkeys(s for s in (symbols or []) if isinstance(s, str) and s.strip()))
     for s in symbols:
         try:
-            trs,a,b=backtest_symbol(s,years); per[s]=trs
-            tmin=a if tmin is None else min(tmin,a); tmax=b if tmax is None else max(tmax,b)
-        except Exception as _ex: log.debug('ignored: %s', _ex)
-    return per,tmin,tmax
+            trs,a,b = backtest_symbol(s,years)
+            if a is None or b is None:
+                errors[s] = "لا توجد فترة بيانات صالحة"
+                continue
+            per[s] = trs if isinstance(trs, list) else []
+            tmin = a if tmin is None else min(tmin,a)
+            tmax = b if tmax is None else max(tmax,b)
+        except Exception as ex:
+            errors[s] = f"{type(ex).__name__}: {ex}"
+            log.exception("backtest_symbol failed for %s", s)
+    return per,tmin,tmax,errors
 
 def admin_only(fn):
     @functools.wraps(fn)
@@ -5047,9 +5110,11 @@ async def cmd_bt(update,ctx):
     except ValueError: years=3.0
     syms=COINS if arg in ("ALL","") else [clean_symbol(arg)]
     wait=await update.message.reply_text("⏳ Backtest...")
-    per,a,b=await asyncio.to_thread(backtest_many,syms,years)
-    if not per: await wait.edit_text("❌"); return
-    text,_=bt_report(per,a,b,arg)
+    per,a,b,errors=await asyncio.to_thread(backtest_many,syms,years)
+    if not per:
+        text,_=bt_report(per,a,b,arg,errors)
+        await wait.edit_text(text[:4000],link_preview_options=NO_PREVIEW); return
+    text,_=bt_report(per,a,b,arg,errors)
     await wait.edit_text(text[:4000],link_preview_options=NO_PREVIEW)
 
 # ======================= تشخيص الباك تست (/btdiag) =======================
@@ -5057,13 +5122,19 @@ _BT_DATA={"ts":0.0,"years":0.0,"syms":[],"d":{}}   # sym -> (raw, d محضّر, 
 _BT_BUSY=[False]
 
 def bt_load(sym,years):
-    need=int(years*6*365)+300
+    years=float(years)
+    if not np.isfinite(years) or years<=0: raise ValueError("مدة غير صالحة")
+    need=int(min(years,10.0)*6*365)+300
     rows=binance_futures_klines_long(sym,"4h",need)
     if rows and len(rows)>=400: df=_rows_to_df(rows,"4h",need)
     else: df=get_candles(sym,"4h",need,ttl=900)
+    if df is None or not isinstance(df,pd.DataFrame) or df.empty:
+        raise NoData(f"{sym}: لا توجد شموع")
     if len(df)<400: return None
-    raw=df[["t","open","high","low","close","volume"]].reset_index(drop=True)
-    return raw,eng_prepare(raw),eng_prepare(eng_resample_daily(raw))
+    raw=df[["t","open","high","low","close","volume"]].dropna().reset_index(drop=True)
+    if len(raw)<400: return None
+    daily=eng_resample_daily(raw)
+    return raw,eng_prepare(raw),eng_prepare(daily) if not daily.empty else pd.DataFrame()
 
 def bt_prepare_all(syms,years):
     c=_BT_DATA
@@ -5088,8 +5159,10 @@ def bt_run(data,cfg=None):
     return trades,tmin,tmax
 
 def _bt_split(trades,tmin,tmax):
+    if not isinstance(tmin,(int,float)) or not isinstance(tmax,(int,float)) or tmax<=tmin:
+        return [],list(trades or [])
     cut=tmin+0.65*(tmax-tmin)   # نفس تقسيم bt_report
-    return [x for x in trades if x["t"]<cut],[x for x in trades if x["t"]>=cut]
+    return [x for x in (trades or []) if x["t"]<cut],[x for x in (trades or []) if x["t"]>=cut]
 
 def _bt_line(name,trs):
     if not trs: return f"{name}: —"
@@ -5105,9 +5178,10 @@ def _bt_group(title,trades,buckets):
 def bt_breakdown(trades,tmin,tmax,nsym):
     tr,te=_bt_split(trades,tmin,tmax); n=len(trades)
     cost=sum(x.get("cost",0) for x in trades); net=sum(x["R"] for x in trades)
+    avg = net/n if n else 0.0
     L=[f"🔬 تشخيص الباك تست · {BOT_VERSION}",f"{nsym} عملة | {n} صفقة","",
        _bt_line("TRAIN",tr),_bt_line("TEST ",te),_bt_line("الكل ",trades),
-       f"💸 رسوم+انزلاق: {-cost:+.1f}R | قبلها: {net+cost:+.1f}R | متوسط/صفقة: {net/n:+.3f}R",
+       f"💸 رسوم+انزلاق: {-cost:+.1f}R | قبلها: {net+cost:+.1f}R | متوسط/صفقة: {avg:+.3f}R",
        "🎯 وصول الأهداف: "+" | ".join(f"TP{k} {100*sum(1 for x in trades if x.get('tps',0)>=k)/n:.0f}%" for k in (1,2,3,4)),
        ""]
     L+=_bt_group("🚪 نوع الخروج",trades,[(k,(lambda x,k=k:x["exit"]==k)) for k in ("SL","BE","TRAIL","TP","TIME")])
@@ -5344,9 +5418,11 @@ async def cmd_bt50(update,ctx):
     except ValueError: years=3.0
     wait=await update.message.reply_text("⏳ Top 50...")
     syms=await asyncio.to_thread(top_symbols,50)
-    per,a,b=await asyncio.to_thread(backtest_many,syms,years)
-    if not per: await wait.edit_text("❌"); return
-    text,_=bt_report(per,a,b,"TOP50")
+    per,a,b,errors=await asyncio.to_thread(backtest_many,syms,years)
+    if not per:
+        text,_=bt_report(per,a,b,"TOP50",errors)
+        await wait.edit_text(text[:4000],link_preview_options=NO_PREVIEW); return
+    text,_=bt_report(per,a,b,"TOP50",errors)
     await wait.edit_text(text[:4000],link_preview_options=NO_PREVIEW)
 
 @admin_only
@@ -5812,9 +5888,11 @@ async def cb_handler(update,ctx):
         if q.from_user.id!=ADMIN_ID: return
         sym=q.data.split(":")[1]
         try:
-            per,a,b=await asyncio.to_thread(backtest_many,[sym],3.0)
-            if not per: await q.message.reply_text("لا بيانات"); return
-            text,_=bt_report(per,a,b,sym)
+            per,a,b,errors=await asyncio.to_thread(backtest_many,[sym],3.0)
+            if not per:
+                text,_=bt_report(per,a,b,sym,errors)
+                await q.message.reply_text(text[:4000]); return
+            text,_=bt_report(per,a,b,sym,errors)
             await q.message.reply_text(text[:4000])
         except Exception as _ex: log.debug('ignored: %s', _ex)
         return
@@ -6422,4 +6500,3 @@ def main():
 
 if __name__ == "__main__":
     main()
- 
